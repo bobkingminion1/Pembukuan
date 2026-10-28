@@ -1,0 +1,31 @@
+PEMBUKUAN PERUSAHAAN - versi aplikasi (PWA)
+
+Folder ini berisi aplikasi lengkap. Tidak perlu server khusus: cukup diunggah ke
+hosting statis yang beralamat https, lalu alamatnya dibagikan ke siapa saja.
+
+1. UNGGAH (pilih salah satu, semuanya punya paket gratis)
+   - Netlify Drop: buka app.netlify.com/drop lalu seret folder ini ke halamannya.
+     Biasanya perlu akun gratis agar situs tidak kedaluwarsa.
+   - GitHub Pages atau Cloudflare Pages: unggah semua berkas di folder ini.
+   Hasilnya berupa alamat https. Itulah alamat aplikasi untuk dibagikan.
+
+2. PASANG DI HP ATAU KOMPUTER
+   - Android (Chrome): menu titik tiga > Instal aplikasi (atau Tambahkan ke layar utama).
+   - iPhone (Safari): tombol Bagikan > Tambah ke Layar Utama.
+   - Komputer (Chrome atau Edge): ikon pasang di ujung kanan kolom alamat.
+   Setelah terpasang, aplikasi tampil layar penuh dan bisa dibuka tanpa internet.
+
+3. JADIKAN BERKAS APK (opsional)
+   Buka pwabuilder.com, masukkan alamat https dari langkah 1, lalu pilih paket Android.
+   Itu layanan pihak ketiga, jadi langkahnya bisa berubah. Untuk memasang APK di luar
+   Play Store, HP harus mengizinkan pemasangan dari sumber lain.
+
+CATATAN
+ - Data tiap pengguna tersimpan di perangkat masing-masing dan tidak dikirim ke server
+   mana pun. Tidak ada akun, dan data tidak ikut berpindah ke perangkat lain.
+ - Unduh cadangan secara berkala di Pengaturan > Data & Cadangan. Cadangan juga dipakai
+   untuk memindahkan data ke perangkat lain (Pulihkan dari berkas).
+ - Menghapus data situs atau cache browser ikut menghapus data pembukuan.
+ - Pustaka Excel dan PDF dimuat dari internet saat aplikasi pertama kali dibuka, lalu
+   tersimpan untuk pemakaian tanpa internet.
+ - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama.
