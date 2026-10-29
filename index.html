@@ -1498,7 +1498,7 @@ function vSelamatDatang() {
     '<h1>Catat kas dan bank, laporan tersusun sendiri.</h1>' +
     '<p class="lead">Setiap transaksi kas dan bank otomatis menjadi jurnal. Laba rugi, neraca, arus kas, rekap bulanan, dan laporan tahunan siap dilihat kapan saja.</p>' +
     '<ul>' + cek('Transaksi masuk, keluar, dan transfer antar rekening dengan saldo berjalan') +
-    cek('Impor mutasi rekening (CSV) dengan kategori otomatis dari kata kunci') +
+    cek('Impor mutasi rekening (PDF, Excel, atau CSV) dengan kategori otomatis dari kata kunci') +
     cek('Laba rugi, neraca, arus kas, dan neraca saldo per bulan, kuartal, atau tahun') +
     cek('Laporan tahunan lengkap dengan ringkasan eksekutif, unduh PDF dan Excel') + '</ul></div>' +
     '<div class="panel"><h2 style="font-size:17px;margin-bottom:4px">Mulai pembukuan</h2><p class="note" style="margin-bottom:14px">Anda bisa mengubah semua isian ini nanti di Pengaturan.</p>' +
@@ -1592,7 +1592,7 @@ function langkahAwal() {
   return '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>Mulai di sini</h2><span class="sub">tiga langkah sebelum laporan terisi</span></div><div class="steps">' +
     st(1, profilOk, 'Lengkapi profil perusahaan', 'Alamat, NPWP, dan penandatangan muncul di laporan tahunan.', '<button class="btn sm" data-act="keSetelan" data-tab="profil">Buka</button>') +
     st(2, adaSA, 'Isi saldo awal', 'Saldo kas, bank, piutang, utang, dan modal pada awal pembukuan.', '<button class="btn sm" data-act="keSetelan" data-tab="saldo">Buka</button>') +
-    st(3, false, 'Catat transaksi pertama', 'Atau impor mutasi rekening bank dalam bentuk CSV.', '<button class="btn sm pri" data-act="tambahTx">Catat</button>') + '</div></div>';
+    st(3, false, 'Catat transaksi pertama', 'Atau impor mutasi rekening bank dari PDF, Excel, atau CSV.', '<button class="btn sm pri" data-act="tambahTx">Catat</button>') + '</div></div>';
 }
 
 /* ================= Kas & Bank ================= */
@@ -1703,16 +1703,27 @@ function simpanTx(lagi) {
   } else tutupModal();
 }
 
-/* ----- impor mutasi bank ----- */
-const BULAN_ALIAS = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, agt: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
-function parseTgl(s) {
+
+/* ===== impor.js ===== */
+/* ================= Impor mutasi rekening: PDF, Excel, atau CSV ================= */
+const BULAN_ALIAS = { jan: 1, feb: 2, mar: 3, apr: 4, mei: 5, may: 5, jun: 6, jul: 7, agu: 8, agt: 8, ags: 8, aug: 8, sep: 9, okt: 10, oct: 10, nov: 11, des: 12, dec: 12 };
+
+/* ----- tanggal dan angka ----- */
+function tanggalAdaTahun(s) {
+  s = String(s || '').trim();
+  return /^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/.test(s) || /^\d{1,2}[-/. ]([A-Za-z]{3,9}|\d{1,2})[-/. ]\d{2,4}(?!\d)/.test(s);
+}
+// thDef: tahun pengganti bila tanggal tertulis tanpa tahun (mis. "01/10" pada e-statement BCA)
+function parseTgl(s, thDef) {
   s = String(s || '').trim().replace(/^'/, '');
   let m;
   if ((m = s.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/))) return ok(+m[1], +m[2], +m[3]);
-  if ((m = s.match(/^(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{2,4})/))) return ok(+m[3] < 100 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
-  if ((m = s.match(/^(\d{1,2})[-/. ]([A-Za-z]{3})[A-Za-z]*[-/. ](\d{2,4})/))) { const mo = BULAN_ALIAS[m[2].toLowerCase()]; return mo ? ok(+m[3] < 100 ? 2000 + +m[3] : +m[3], mo, +m[1]) : null; }
+  if ((m = s.match(/^(\d{1,2})[-/. ](\d{1,2})[-/. ](\d{2,4})(?!\d)/))) return ok(+m[3] < 100 ? 2000 + +m[3] : +m[3], +m[2], +m[1]);
+  if ((m = s.match(/^(\d{1,2})[-/. ]([A-Za-z]{3})[A-Za-z]*[-/. ,]*(\d{2,4})(?!\d)/))) { const mo = BULAN_ALIAS[m[2].toLowerCase()]; return mo ? ok(+m[3] < 100 ? 2000 + +m[3] : +m[3], mo, +m[1]) : null; }
+  if (thDef && (m = s.match(/^(\d{1,2})[-/.](\d{1,2})(?![-/.\d])/))) return ok(thDef, +m[2], +m[1]);
+  if (thDef && (m = s.match(/^(\d{1,2})[-/. ]([A-Za-z]{3})[A-Za-z]*(?![A-Za-z]|[-/. ]?\d)/))) { const mo = BULAN_ALIAS[m[2].toLowerCase()]; return mo ? ok(thDef, mo, +m[1]) : null; }
   return null;
-  function ok(y, mo, d) { if (mo < 1 || mo > 12 || d < 1 || d > 31) return null; return y + '-' + pad2(mo) + '-' + pad2(d); }
+  function ok(y, mo, d) { if (mo < 1 || mo > 12 || d < 1 || d > 31 || y < 1990 || y > 2100) return null; return y + '-' + pad2(mo) + '-' + pad2(d); }
 }
 function parseAngka(s) {
   s = String(s == null ? '' : s).trim();
@@ -1727,6 +1738,8 @@ function parseAngka(s) {
   const v = Math.abs(Math.round(parseFloat(s) || 0));
   return neg ? -v : v;
 }
+
+/* ----- teks / CSV -> tabel ----- */
 function pecahBaris(l, d) {
   const out = []; let cur = '', q = false;
   for (let i = 0; i < l.length; i++) {
@@ -1737,42 +1750,66 @@ function pecahBaris(l, d) {
   out.push(cur);
   return out.map(x => x.trim());
 }
-function parseMutasi(teks, akunBank) {
+function matriksDariTeks(teks) {
   const lines = String(teks || '').replace(/\r/g, '').split('\n').filter(l => l.trim());
   if (!lines.length) return [];
-  const cnt = d => lines.slice(0, 6).reduce((s, l) => s + (l.split(d).length - 1), 0);
+  const cnt = d => lines.slice(0, 8).reduce((s, l) => s + (l.split(d).length - 1), 0);
   const delim = [';', '\t', ','].sort((a, b) => cnt(b) - cnt(a))[0];
-  const tab = lines.map(l => pecahBaris(l, delim));
-  let hi = tab.findIndex(r => r.some(c => /tanggal|tgl|date/i.test(c)) && r.some(c => /ket|desk|uraian|remark|berita|transaksi|descr|debit|kredit|debet|credit|jumlah|amount/i.test(c)));
-  let kol = { tgl: 0, ket: 1, debit: 2, kredit: 3, jumlah: -1 };
+  return lines.map(l => pecahBaris(l, delim));
+}
+
+/* ----- tabel -> baris transaksi (dipakai CSV, Excel, dan PDF) ----- */
+const RE_JENIS_KOL = /^(db\s*\/\s*cr|cr\s*\/\s*db|d\s*\/\s*k|k\s*\/\s*d|d\s*\/\s*c|c\s*\/\s*d|dc|dk|jenis|type|tipe|cr\/db)$/i;
+function tahunTerbanyak(teks) {
+  const hit = {}; let best = 0, bc = 0;
+  (String(teks).match(/\b20\d{2}\b/g) || []).forEach(y => { hit[y] = (hit[y] || 0) + 1; if (hit[y] > bc) { bc = hit[y]; best = +y; } });
+  return best;
+}
+function parseMutasiTabel(tab, akunBank, thDef) {
+  tab = (tab || []).map(r => r.map(c => (c == null ? '' : String(c)))).filter(r => r.some(c => c.trim()));
+  if (!tab.length) return [];
+  let hi = tab.findIndex(r => r.filter(c => c.trim()).length >= 2 && r.some(c => /tanggal|tgl|date/i.test(c)) && r.some(c => /ket|desk|uraian|remark|berita|transaksi|descr|debit|kredit|debet|credit|jumlah|amount|mutasi|nominal/i.test(c)));
+  let kol = { tgl: 0, ket: 1, debit: 2, kredit: 3, jumlah: -1, dk: -1 };
   if (hi >= 0) {
-    kol = { tgl: -1, ket: -1, debit: -1, kredit: -1, jumlah: -1 };
+    kol = { tgl: -1, ket: -1, debit: -1, kredit: -1, jumlah: -1, dk: -1 };
     tab[hi].forEach((c, i) => {
-      const x = c.toLowerCase();
+      const x = c.toLowerCase().trim();
       if (kol.tgl < 0 && /tanggal|tgl|date/.test(x)) kol.tgl = i;
+      else if (kol.dk < 0 && RE_JENIS_KOL.test(x)) kol.dk = i;
       else if (kol.ket < 0 && /keterangan|deskripsi|description|uraian|remark|berita|transaksi/.test(x)) kol.ket = i;
       else if (kol.debit < 0 && /^(debit|debet|db|dr|keluar)\b|debit|debet/.test(x)) kol.debit = i;
       else if (kol.kredit < 0 && /^(kredit|credit|cr|kr|masuk)\b|kredit|credit/.test(x)) kol.kredit = i;
       else if (kol.jumlah < 0 && /jumlah|amount|nominal|mutasi/.test(x)) kol.jumlah = i;
     });
-    if (kol.ket < 0) kol.ket = tab[hi].findIndex((c, i) => i !== kol.tgl && i !== kol.debit && i !== kol.kredit && i !== kol.jumlah && !/saldo|balance/i.test(c));
+    if (kol.tgl < 0) kol.tgl = 0;
+    if (kol.ket < 0) kol.ket = tab[hi].findIndex((c, i) => i !== kol.tgl && i !== kol.debit && i !== kol.kredit && i !== kol.jumlah && i !== kol.dk && !/saldo|balance/i.test(c));
+    if (kol.ket < 0) kol.ket = kol.tgl === 0 ? 1 : 0;
   } else hi = -1;
+  const th0 = thDef || tahunTerbanyak(tab.slice(0, Math.max(hi, 0)).map(r => r.join(' ')).join(' ')) || (typeof UI !== 'undefined' && UI.tahun) || new Date().getFullYear();
+  let thNow = th0, lastMo = 0;
   const adaDup = new Set(M.txAll.filter(t => t.akun === akunBank).map(t => t.tgl + '|' + t.jenis + '|' + Math.round(t.jml)));
   const out = [];
   tab.slice(hi + 1).forEach(r => {
-    const tgl = parseTgl(r[kol.tgl]);
+    const rawT = String(r[kol.tgl] || '').trim();
+    let tgl = parseTgl(rawT, thNow);
     if (!tgl) return;
+    if (!tanggalAdaTahun(rawT)) {
+      const mo = +tgl.slice(5, 7);
+      if (lastMo && mo < lastMo - 6) { thNow++; tgl = parseTgl(rawT, thNow); }
+      lastMo = mo;
+    }
     let jenis = '', jml = 0;
     if (kol.debit >= 0 || kol.kredit >= 0) {
       const d = kol.debit >= 0 ? Math.abs(parseAngka(r[kol.debit])) : 0, k = kol.kredit >= 0 ? Math.abs(parseAngka(r[kol.kredit])) : 0;
       if (k > 0 && d === 0) { jenis = 'masuk'; jml = k; } else if (d > 0 && k === 0) { jenis = 'keluar'; jml = d; } else if (k > 0 && d > 0) { jenis = k >= d ? 'masuk' : 'keluar'; jml = Math.abs(k - d); }
     } else if (kol.jumlah >= 0) {
-      const raw = r[kol.jumlah] || '', v = parseAngka(raw);
-      const keluar = /\bDB\b|\bD$|DEBIT/i.test(raw) || v < 0, masuk = /\bCR\b|\bK$|CREDIT|KREDIT/i.test(raw);
+      const raw = r[kol.jumlah] || '', v = parseAngka(raw), dk = kol.dk >= 0 ? String(r[kol.dk] || '').trim() : '';
+      const keluar = /\bDB\b|\bD$|\bDR\b|DEBIT|DEBET/i.test(raw) || v < 0 || /^(db|d|dr|debit|debet)$/i.test(dk);
+      const masuk = /\bCR\b|\bK$|CREDIT|KREDIT/i.test(raw) || /^(cr|k|kr|c|credit|kredit)$/i.test(dk);
       jml = Math.abs(v); jenis = keluar && !masuk ? 'keluar' : 'masuk';
     }
     if (!jenis || !jml) return;
-    const ket = (r[kol.ket] || '').replace(/\s+/g, ' ').trim();
+    const ket = String(r[kol.ket] || '').replace(/\s+/g, ' ').trim();
     const rule = cocokAturan(M.cfg.aturan, ket, jenis);
     const lawan = rule && M.am[rule.akun] && !M.am[rule.akun].kas ? rule.akun : (jenis === 'masuk' ? (M.am['7-2000'] ? '7-2000' : defaultLawan('masuk')) : (M.am['6-2000'] ? '6-2000' : defaultLawan('keluar')));
     const dup = adaDup.has(tgl + '|' + jenis + '|' + jml);
@@ -1780,6 +1817,204 @@ function parseMutasi(teks, akunBank) {
   });
   return out;
 }
+const parseMutasi = (teks, akunBank) => parseMutasiTabel(matriksDariTeks(teks), akunBank);
+
+/* ----- Excel ----- */
+function selKeTeks(sel) {
+  if (!sel || sel.v == null || sel.v === '') return '';
+  if (sel.t === 'n') {
+    if (sel.z && typeof sel.z === 'string' && XLSX.SSF && XLSX.SSF.is_date(sel.z)) {
+      const d = XLSX.SSF.parse_date_code(sel.v);
+      if (d && d.y) return d.y + '-' + pad2(d.m) + '-' + pad2(d.d);
+    }
+    const v = sel.v;
+    return Number.isInteger(v) ? String(v) : (Math.round(v * 100) / 100).toFixed(2).replace('.', ',');
+  }
+  if (sel.t === 'd' && sel.v instanceof Date) return sel.v.getFullYear() + '-' + pad2(sel.v.getMonth() + 1) + '-' + pad2(sel.v.getDate());
+  if (sel.t === 'e') return '';
+  return String(sel.v);
+}
+function matriksDariSheet(ws) {
+  if (!ws || !ws['!ref']) return [];
+  const rg = XLSX.utils.decode_range(ws['!ref']), out = [];
+  for (let r = rg.s.r; r <= rg.e.r; r++) {
+    const baris = [];
+    for (let c = rg.s.c; c <= rg.e.c; c++) baris.push(selKeTeks(ws[XLSX.utils.encode_cell({ r, c })]));
+    out.push(baris);
+  }
+  return out;
+}
+async function bacaExcelMutasi(file) {
+  if (typeof XLSX === 'undefined') throw new Error('Pustaka Excel belum termuat. Periksa koneksi internet, lalu muat ulang halaman.');
+  let wb;
+  try { wb = XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: 'array', cellNF: true, cellText: true }); }
+  catch (e) { throw new Error('Berkas Excel tidak bisa dibuka. Bila diberi kata sandi, simpan dulu tanpa kata sandi atau ekspor ke CSV.'); }
+  let best = [];
+  wb.SheetNames.forEach(n => { const rows = parseMutasiTabel(matriksDariSheet(wb.Sheets[n]), IMP.akun); if (rows.length > best.length) best = rows; });
+  return best;
+}
+
+/* ----- PDF (pdf.js dimuat saat dibutuhkan saja) ----- */
+const PDFJS_BASE = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.10.38/legacy/build/';
+let pdfjsP = null;
+function muatPdfJs() {
+  if (!pdfjsP) {
+    const base = window.PDFJS_BASE_URL || PDFJS_BASE;
+    pdfjsP = import(base + 'pdf.min.mjs').then(m => {
+      const lib = m && m.getDocument ? m : (m && m.default) || m;
+      lib.GlobalWorkerOptions.workerSrc = base + 'pdf.worker.min.mjs';
+      return lib;
+    }).catch(e => { pdfjsP = null; throw new Error('Pembaca PDF belum bisa dimuat. Periksa koneksi internet, atau gunakan berkas Excel atau CSV.'); });
+  }
+  return pdfjsP;
+}
+
+// satu halaman: item teks pdf.js -> baris, tiap baris berisi sel (teks berdekatan digabung)
+function barisPdf(items) {
+  const its = items.filter(i => i && typeof i.str === 'string' && i.str.trim() && i.transform).map(i => ({ x: i.transform[4], y: i.transform[5], w: i.width || 0, h: Math.abs(i.height) || Math.abs(i.transform[3]) || 9, s: i.str }));
+  its.sort((a, b) => b.y - a.y || a.x - b.x);
+  const garis = [];
+  its.forEach(it => {
+    const g = garis[garis.length - 1];
+    if (g && Math.abs(g.y - it.y) <= Math.max(2, it.h * 0.4)) g.it.push(it); else garis.push({ y: it.y, it: [it] });
+  });
+  return garis.map(g => {
+    g.it.sort((a, b) => a.x - b.x);
+    const sel = [];
+    g.it.forEach(it => {
+      const p = sel[sel.length - 1], gap = p ? it.x - p.x1 : 0;
+      if (p && gap < Math.max(3, it.h * 0.7)) {
+        p.t += (gap > it.h * 0.12 && !/\s$/.test(p.t) && !/^\s/.test(it.s) ? ' ' : '') + it.s;
+        p.x1 = Math.max(p.x1, it.x + it.w);
+      } else sel.push({ x0: it.x, x1: it.x + it.w, t: it.s });
+    });
+    sel.forEach(c => { c.t = c.t.replace(/\s+/g, ' ').trim(); });
+    return { y: g.y, sel: sel.filter(c => c.t) };
+  }).filter(b => b.sel.length);
+}
+const RE_ANGKA_SEL = /^[-(]?\d[\d.,]*\)?(\s?(DB|CR|DR|D|K))?$/i;
+// angka uang: ada pemisah ribuan/desimal atau akhiran DB/CR (bilangan polos seperti kode cabang "0000" bukan angka uang)
+const miripAngka = t => { t = String(t).trim(); return RE_ANGKA_SEL.test(t) && (/[.,]\d{1,2}(\s?(DB|CR|DR|D|K))?$/i.test(t) || /\d[.,]\d{3}/.test(t) || /\s(DB|CR|DR|D|K)$/i.test(t)) && !parseTgl(t, 2000); };
+const RE_KOL_ANGKA = /debit|debet|kredit|credit|jumlah|amount|saldo|balance|mutasi|nominal/i;
+const RE_AKHIR_PDF = /saldo\s*(awal|akhir)|mutasi\s*(cr|db|debit|kredit)|\btotal\b|bersambung|halaman|page\s*\d|continued|jumlah\s+mutasi|opening balance|closing balance|^\s*(cr|db)\s*:/i;
+function adalahHeaderPdf(sel) {
+  const txt = sel.map(c => c.t).join(' ').toLowerCase();
+  return sel.length >= 3 && /tanggal|tgl|date/.test(txt) && /debit|debet|kredit|credit|mutasi|amount|jumlah|nominal/.test(txt) && !/\d{1,2}[-/.]\d{1,2}[-/.]\d{2}/.test(txt);
+}
+// pdf.js menggabungkan teks yang berdekatan menjadi satu sel ("TANGGAL KETERANGAN"); judul seperti itu dipecah lagi per nama kolom
+const RE_KATA_KOLOM = /^(tanggal|tgl|date|keterangan|uraian|deskripsi|description|remark|remarks|berita|cbg|cabang|branch|teller|mutasi|debit|debet|kredit|credit|saldo|balance|jumlah|amount|nominal|referensi|reference|jenis|type)$/i;
+function pecahSelHeader(sel) {
+  const out = [];
+  sel.forEach(c => {
+    const w = c.t.split(' ');
+    if (w.length < 2 || /\d/.test(c.t)) { out.push(c); return; }
+    const segs = []; let cur = [w[0]];
+    for (let i = 1; i < w.length; i++) {
+      const awal = RE_KATA_KOLOM.test(w[i].replace(/[^A-Za-z]/g, '')) && !(/^date$/i.test(w[i]) && /^(posting|value|effective|trx|transaction|entry)$/i.test(w[i - 1]));
+      if (awal) { segs.push(cur); cur = [w[i]]; } else cur.push(w[i]);
+    }
+    segs.push(cur);
+    if (segs.length < 2) { out.push(c); return; }
+    const n = c.t.length; let pos = 0;
+    segs.forEach(sg => {
+      const txt = sg.join(' ');
+      out.push({ x0: c.x0 + (pos / n) * (c.x1 - c.x0), x1: c.x0 + ((pos + txt.length) / n) * (c.x1 - c.x0), t: txt });
+      pos += txt.length + 1;
+    });
+  });
+  return out;
+}
+const selHeaderPdf = sel => { const s2 = pecahSelHeader(sel); return adalahHeaderPdf(s2) ? s2 : null; };
+function kolomPdf(c, kolom, hdr) {
+  const angka = miripAngka(c.t), cx = (c.x0 + c.x1) / 2;
+  let best = 0, bd = 1e9;
+  kolom.forEach((k, i) => {
+    let d = Math.min(Math.abs(c.x0 - k.x0), Math.abs(c.x1 - k.x1), Math.abs(cx - (k.x0 + k.x1) / 2));
+    const kolAngka = RE_KOL_ANGKA.test(hdr[i]);
+    if (angka && !kolAngka) d += 25;
+    if (!angka && kolAngka && /[A-Za-z]{3,}/.test(c.t)) d += 25;
+    if (d < bd) { bd = d; best = i; }
+  });
+  return best;
+}
+// halaman: array berisi item teks tiap halaman. Hasil: tabel ala spreadsheet + tahun yang terbaca dari kop
+function matriksDariPdf(halaman) {
+  const semua = [];
+  let teks = 0;
+  halaman.forEach(items => barisPdf(items).forEach(b => { teks += b.sel.map(c => c.t).join('').length; semua.push(b); }));
+  const iHdr = semua.findIndex(b => selHeaderPdf(b.sel));
+  const kop = (iHdr >= 0 ? semua.slice(0, iHdr) : semua.slice(0, 25)).map(b => b.sel.map(c => c.t).join(' ')).join(' ');
+  const tahun = tahunTerbanyak(kop) || (typeof UI !== 'undefined' && UI.tahun) || new Date().getFullYear();
+  const hasil = { tab: [], tahun, teksSedikit: teks < 30 };
+  if (iHdr >= 0) {
+    let kolom = null, hdr = null, kTgl = 0, prev = null;
+    semua.slice(iHdr).forEach(b => {
+      const hs = selHeaderPdf(b.sel);
+      if (hs) {
+        kolom = hs.map(c => ({ x0: c.x0, x1: c.x1 })); hdr = hs.map(c => c.t); prev = null;
+        kTgl = Math.max(0, hdr.findIndex(h => /tanggal|tgl|date/i.test(h)));
+        if (!hasil.tab.length) hasil.tab.push(hdr);
+        return;
+      }
+      const t = b.sel.map(c => c.t).join(' ');
+      const cells = kolom.map(() => []);
+      b.sel.forEach(c => cells[kolomPdf(c, kolom, hdr)].push(c.t));
+      const baris = cells.map(a => a.join(' '));
+      if (parseTgl(baris[kTgl], tahun)) { prev = baris; hasil.tab.push(baris); return; }
+      if (RE_AKHIR_PDF.test(t)) { prev = null; return; }
+      if (!prev) return;
+      baris.forEach((v, i) => {
+        if (!v || i === kTgl) return;
+        prev[i] = prev[i] ? (RE_KOL_ANGKA.test(hdr[i]) ? prev[i] : prev[i] + ' ' + v) : v;
+      });
+    });
+    return hasil;
+  }
+  // tanpa judul kolom: baca per baris (tanggal di depan, angka di belakang)
+  const RE_TGL_AWAL = /^(\d{4}-\d{2}-\d{2}|\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?|\d{1,2}[-/. ][A-Za-z]{3,9}[-/. ,]*\d{2,4})(?:\s+(.*))?$/;
+  hasil.tab.push(['Tanggal', 'Keterangan', 'Jumlah']);
+  let prev = null, saldoPrev = null;
+  semua.forEach(b => {
+    const cells = b.sel.map(c => c.t), t = cells.join(' ');
+    const m = (cells[0] || '').match(RE_TGL_AWAL);
+    if (!m || !parseTgl(m[1], tahun)) {
+      const sa = /saldo\s*awal|opening balance/i.test(t) ? cells.find(miripAngka) : null;
+      if (sa) saldoPrev = parseAngka(sa);
+      if (RE_AKHIR_PDF.test(t)) prev = null; else if (prev && !cells.some(miripAngka)) prev[1] += ' ' + t;
+      return;
+    }
+    const sisa = (m[2] ? [m[2]] : []).concat(cells.slice(1));
+    const amt = [], desc = [];
+    sisa.forEach(c => { if (miripAngka(c)) amt.push(c); else desc.push(c); });
+    if (!amt.length) return;
+    const dua = amt.length >= 2, mut = dua ? amt[amt.length - 2] : amt[0], sal = dua ? amt[amt.length - 1] : null;
+    let keluar = /\b(DB|DR|D)$/i.test(mut) || /\bDB\b/.test(desc.join(' '));
+    const masuk = /\b(CR|K)$/i.test(mut);
+    if (!keluar && !masuk && sal != null && saldoPrev != null) keluar = parseAngka(sal) < saldoPrev;
+    if (sal != null) saldoPrev = parseAngka(sal);
+    prev = [m[1], desc.join(' '), (keluar && !/\b(DB|DR|D)$/i.test(mut) ? mut + ' DB' : mut)];
+    hasil.tab.push(prev);
+  });
+  return hasil;
+}
+async function bacaPdfMutasi(file, kataSandi) {
+  const lib = await muatPdfJs();
+  const data = new Uint8Array(await file.arrayBuffer());
+  let doc;
+  try { doc = await lib.getDocument({ data, password: kataSandi || undefined, isEvalSupported: false }).promise; }
+  catch (e) {
+    if (e && e.name === 'PasswordException') return { sandi: e.code === 2 ? 'salah' : 'perlu' };
+    throw new Error('PDF tidak bisa dibuka. Pastikan berkasnya tidak rusak.');
+  }
+  const halaman = [];
+  for (let p = 1; p <= Math.min(doc.numPages, 300); p++) {
+    const pg = await doc.getPage(p), tc = await pg.getTextContent();
+    halaman.push(tc.items);
+  }
+  return Object.assign({ sandi: '' }, matriksDariPdf(halaman));
+}
+
+/* ----- tampilan ----- */
 const CONTOH_MUTASI = [
   'Tanggal;Keterangan;Debit;Kredit;Saldo',
   '01/10/2026;BIAYA ADM BULANAN;150.000,00;;',
@@ -1792,29 +2027,69 @@ const CONTOH_MUTASI = [
   '28/10/2026;BUNGA TABUNGAN;;112.500,00;',
 ].join('\n');
 let IMP = null;
+const impPesan = (t, galat) => { const e = $('#imp-err'); if (e) { e.textContent = t || ''; e.className = 'hint' + (galat === false ? '' : ' neg'); } };
 function bukaImpor() {
   if (!Store.canWrite) { toast('Akses Anda hanya untuk melihat.', true); return; }
-  IMP = { rows: [], akun: UI.kas.rek || (M.kasAkun.find(a => /bank/i.test(a.nama)) || M.kasAkun[0] || {}).kode };
+  IMP = { rows: [], akun: UI.kas.rek || (M.kasAkun.find(a => /bank/i.test(a.nama)) || M.kasAkun[0] || {}).kode, sumber: '', file: null };
   bukaModal({
     judul: 'Impor mutasi rekening', lebar: true, tanpaFokus: true,
-    isi: '<div id="imp-1"><div class="grid2"><div class="fld"><label class="lbl" for="imp-akun">Rekening</label><select class="in" id="imp-akun">' + M.kasAkun.map(a => opt(a.kode, a.nama, IMP.akun)).join('') + '</select></div>' +
-      '<div class="fld"><label class="lbl" for="imp-file">Berkas CSV dari internet banking</label><input class="in" id="imp-file" type="file" accept=".csv,.txt,text/csv,text/plain" style="padding-top:5px"></div></div>' +
-      '<div class="fld"><label class="lbl" for="imp-teks">Atau tempel isi mutasi di sini</label><textarea class="in mono" id="imp-teks" rows="8" placeholder="Tanggal;Keterangan;Debit;Kredit;Saldo" style="font-size:12.5px"></textarea>' +
+    isi: '<div id="imp-1"><div class="fld"><label class="lbl" for="imp-akun">Rekening yang mutasinya diimpor</label><select class="in" id="imp-akun">' + M.kasAkun.map(a => opt(a.kode, a.nama, IMP.akun)).join('') + '</select></div>' +
+      '<div class="fld"><label class="lbl" for="imp-file">Berkas mutasi: PDF, Excel, atau CSV</label><input class="in" id="imp-file" type="file" accept=".pdf,.xlsx,.xls,.csv,.txt,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/plain" style="padding-top:5px">' +
+      '<div class="hint">Pilih rekening dulu, lalu berkasnya. Hasil bacaan ditampilkan lebih dulu, dan belum ada yang tercatat sampai Anda menekan tombol Catat. PDF harus berupa e-statement berisi teks, bukan foto atau hasil scan.</div></div>' +
+      '<div class="fld" id="imp-pw" hidden><label class="lbl" for="imp-pwd">Kata sandi PDF</label><div class="lawan-row"><input class="in" id="imp-pwd" type="password" autocomplete="off"><button class="btn" type="button" data-act="impPdfPw">Buka PDF</button></div><div class="hint" id="imp-pw-h">PDF ini dikunci. Kata sandinya diberikan bank saat Anda mengunduh e-statement.</div></div>' +
+      '<div class="fld"><label class="lbl" for="imp-teks">Atau tempel isi mutasi sebagai teks</label><textarea class="in mono" id="imp-teks" rows="6" placeholder="Tanggal;Keterangan;Debit;Kredit;Saldo" style="font-size:12.5px"></textarea>' +
       '<div class="hint">Kolom dikenali dari judulnya: tanggal, keterangan, debit, kredit (atau jumlah dengan DB/CR). Pemisah titik koma, koma, atau tab. <button class="btn sm ghost" type="button" data-act="impContoh">Isi contoh mutasi</button></div></div></div>' +
       '<div id="imp-2" hidden></div><div class="hint neg" id="imp-err" role="alert"></div>',
-    tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" id="imp-go" data-act="impProses">Baca mutasi</button>',
+    tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" id="imp-go" data-act="impProses">Baca teks yang ditempel</button>',
   });
+}
+async function impBacaBerkas(file, kataSandi) {
+  if (!IMP || !file) return;
+  const nama = String(file.name || '').toLowerCase();
+  IMP.akun = $('#imp-akun').value;
+  const pdf = /\.pdf$/.test(nama) || file.type === 'application/pdf', xls = /\.(xlsx|xlsm|xls|ods)$/.test(nama);
+  $('#imp-pw').hidden = true;
+  impPesan('Membaca ' + file.name + '…', false);
+  try {
+    let rows = [], sumber = '';
+    if (pdf) {
+      const r = await bacaPdfMutasi(file, kataSandi);
+      if (r.sandi) {
+        IMP.file = file; $('#imp-pw').hidden = false; $('#imp-pwd').value = '';
+        $('#imp-pw-h').textContent = r.sandi === 'salah' ? 'Kata sandi salah. Coba lagi.' : 'PDF ini dikunci. Kata sandinya diberikan bank saat Anda mengunduh e-statement.';
+        impPesan('', false); $('#imp-pwd').focus(); return;
+      }
+      rows = parseMutasiTabel(r.tab, IMP.akun, r.tahun); sumber = 'PDF';
+      if (!rows.length) {
+        impPesan(r.teksSedikit ? 'PDF ini tampaknya berupa gambar (hasil scan atau foto), sehingga tulisannya tidak bisa dibaca. Unduh e-statement versi teks dari aplikasi bank, atau gunakan Excel atau CSV.'
+          : 'Tabel transaksi di PDF ini belum bisa dikenali. Coba unduh mutasi dalam bentuk Excel atau CSV dari internet banking, atau salin tabelnya ke kolom teks di bawah.');
+        return;
+      }
+    } else if (xls) {
+      rows = await bacaExcelMutasi(file); sumber = 'Excel';
+      if (!rows.length) { impPesan('Tidak ada baris transaksi yang terbaca. Pastikan sheet punya kolom Tanggal, Keterangan, dan Debit/Kredit (atau Jumlah).'); return; }
+    } else {
+      const txt = await new Promise((ok, gagal) => { const rd = new FileReader(); rd.onload = () => ok(String(rd.result || '')); rd.onerror = gagal; rd.readAsText(file); });
+      rows = parseMutasi(txt, IMP.akun); sumber = 'CSV';
+      if (!rows.length) { impPesan('Tidak ada baris transaksi yang terbaca. Pastikan ada kolom tanggal, keterangan, dan debit atau kredit.'); return; }
+    }
+    IMP.rows = rows; IMP.sumber = sumber + ' · ' + file.name;
+    impPesan('', false); tampilImpor();
+  } catch (e) { impPesan((e && e.message) || 'Berkas tidak bisa dibaca.'); }
 }
 function tampilImpor() {
   const rows = IMP.rows, n = rows.filter(r => r.pakai).length;
   const lawanOpt = (jenis, sel) => optAkunGrup(a => !a.kas, sel);
+  const pdf = /^PDF/.test(IMP.sumber || '');
   $('#imp-1').hidden = true; $('#imp-2').hidden = false;
-  $('#imp-2').innerHTML = '<p class="note"><b>' + rows.length + ' baris terbaca.</b> Akun lawan dipilih otomatis dari aturan kata kunci. Baris bertanda <span class="chip warn">Cek akun</span> belum cocok aturan mana pun. <span class="chip">Sudah ada</span> berarti transaksi serupa (tanggal, jenis, jumlah) sudah tercatat.</p>' +
+  $('#imp-2').innerHTML = (IMP.sumber ? '<p class="note" style="margin-bottom:6px">Sumber: ' + esc(IMP.sumber) + '. ' + (pdf ? '<b>Format PDF tiap bank berbeda, jadi cocokkan beberapa baris dengan mutasi aslinya</b> (tanggal, jumlah, masuk atau keluar) sebelum mencatat.' : '') + '</p>' : '') +
+    '<p class="note"><b>' + rows.length + ' baris terbaca.</b> Akun lawan dipilih otomatis dari aturan kata kunci. Baris bertanda <span class="chip warn">Cek akun</span> belum cocok aturan mana pun. <span class="chip">Sudah ada</span> berarti transaksi serupa (tanggal, jenis, jumlah) sudah tercatat.</p>' +
     '<div class="tw" style="max-height:52vh;overflow:auto"><table class="t"><thead><tr><th></th><th>Tanggal</th><th>Keterangan</th><th>Akun lawan</th><th class="r">Masuk</th><th class="r">Keluar</th></tr></thead><tbody>' +
     rows.map((r, i) => '<tr><td><input type="checkbox" data-imp="pakai" data-i="' + i + '"' + (r.pakai ? ' checked' : '') + ' aria-label="Catat baris ' + (i + 1) + '"></td><td style="white-space:nowrap">' + tglFmt(r.tgl) + '</td>' +
       '<td><div class="k1">' + esc(r.ket) + '</div>' + (r.dup ? '<span class="chip">Sudah ada</span>' : !r.cocok ? '<span class="chip warn">Cek akun</span>' : '') + '</td>' +
       '<td style="min-width:200px"><select class="in sm" data-imp="lawan" data-i="' + i + '" aria-label="Akun lawan baris ' + (i + 1) + '">' + lawanOpt(r.jenis, r.lawan) + '</select></td>' +
-      '<td class="n pos">' + (r.jenis === 'masuk' ? angka(r.jml) : '') + '</td><td class="n">' + (r.jenis === 'keluar' ? angka(r.jml) : '') + '</td></tr>').join('') + '</tbody></table></div>';
+      '<td class="n pos">' + (r.jenis === 'masuk' ? angka(r.jml) : '') + '</td><td class="n">' + (r.jenis === 'keluar' ? angka(r.jml) : '') + '</td></tr>').join('') + '</tbody></table></div>' +
+    '<p class="note" style="margin-top:8px">Total terbaca: masuk <b>' + angka(rows.reduce((s, r) => s + (r.jenis === 'masuk' ? r.jml : 0), 0)) + '</b>, keluar <b>' + angka(rows.reduce((s, r) => s + (r.jenis === 'keluar' ? r.jml : 0), 0)) + '</b>.</p>';
   const go = $('#imp-go'); go.textContent = 'Catat ' + n + ' transaksi'; go.dataset.act = 'impSimpan';
   $('.md-f').insertAdjacentHTML('afterbegin', '<button class="btn" data-act="impKembali" id="imp-back">Kembali</button><span class="sp"></span>');
 }
@@ -2217,7 +2492,7 @@ function vData() {
   const sim = Store.mode === 'db' ? 'Disimpan di penyimpanan halaman ini dan tetap ada saat Anda membukanya lagi.' : Store.mode === 'local' ? 'Disimpan di browser ini saja. Data tidak ikut ke perangkat lain, jadi unduh cadangan secara berkala.' : 'Belum tersimpan permanen di tampilan ini. Unduh cadangan sebelum menutup halaman.';
   return '<div class="cols ce" style="max-width:980px"><div class="panel"><div class="panel-h"><h2>Penyimpanan</h2></div><dl class="kv"><dt>Transaksi kas &amp; bank</dt><dd>' + fmtN.format(nTx) + '</dd><dt>Jurnal manual</dt><dd>' + fmtN.format(nJr) + '</dd><dt>Bulan berisi data</dt><dd>' + nBln + '</dd><dt>Akun</dt><dd>' + M.akun.length + '</dd><dt>Status</dt><dd>' + sim + '</dd></dl></div>' +
     '<div class="panel"><div class="panel-h"><h2>Cadangan</h2></div><p class="note" style="margin-bottom:12px">Cadangan berisi semua profil, akun, saldo awal, dan transaksi dalam satu berkas JSON.</p><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" data-act="unduhCadangan">' + IC.unduh + ' Unduh cadangan</button><label class="btn" for="pulih-file" style="cursor:pointer">Pulihkan dari berkas…</label><input id="pulih-file" type="file" accept=".json,application/json" class="sr"></div></div>' +
-    '<div class="panel"><div class="panel-h"><h2>Impor transaksi</h2></div><p class="note" style="margin-bottom:12px">Unggah mutasi rekening (CSV) dari internet banking. Kategori akun diisi otomatis dari aturan.</p><button class="btn" data-act="bukaImpor">Impor mutasi bank</button></div>' +
+    '<div class="panel"><div class="panel-h"><h2>Impor transaksi</h2></div><p class="note" style="margin-bottom:12px">Unggah mutasi rekening dari internet banking atau e-statement (PDF, Excel, atau CSV). Kategori akun diisi otomatis dari aturan.</p><button class="btn" data-act="bukaImpor">Impor mutasi bank</button></div>' +
     '<div class="panel"><div class="panel-h"><h2>Mulai ulang</h2></div><p class="note" style="margin-bottom:12px">' + (M.cfg.demo ? 'Saat ini memakai data contoh.' : 'Tindakan ini menghapus seluruh data pembukuan.') + '</p><div style="display:flex;gap:8px;flex-wrap:wrap">' +
     (M.cfg.demo ? '<button class="btn pri" data-act="mulaiSendiri">Hapus data contoh, mulai dengan data saya</button>' : '<button class="btn" data-act="muatContohKonfirm">Ganti dengan data contoh</button><button class="btn bahaya" data-act="hapusSemua">Hapus semua data</button>') + '</div></div></div>';
 }
@@ -2574,18 +2849,19 @@ const ACT = {
   hapusTx(el) { two(el, () => { if (Store.hapusTx(TX.id)) toast('Transaksi dihapus.'); tutupModal(); }); },
 
   bukaImpor() { bukaImpor(); },
+  impPdfPw() { if (IMP && IMP.file) impBacaBerkas(IMP.file, $('#imp-pwd').value); },
   impContoh() { $('#imp-teks').value = CONTOH_MUTASI; },
   impProses() {
     const err = $('#imp-err'); err.textContent = '';
     IMP.akun = $('#imp-akun').value;
     const rows = parseMutasi($('#imp-teks').value, IMP.akun);
     if (!rows.length) { err.textContent = 'Tidak ada baris transaksi yang terbaca. Pastikan ada kolom tanggal, keterangan, dan debit atau kredit.'; return; }
-    IMP.rows = rows; tampilImpor();
+    IMP.rows = rows; IMP.sumber = 'Teks yang ditempel'; tampilImpor();
   },
   impKembali() {
     $('#imp-1').hidden = false; $('#imp-2').hidden = true;
     const b = $('#imp-back'); if (b.nextElementSibling) b.nextElementSibling.remove(); b.remove();
-    const go = $('#imp-go'); go.textContent = 'Baca mutasi'; go.dataset.act = 'impProses'; go.disabled = false;
+    const go = $('#imp-go'); go.textContent = 'Baca teks yang ditempel'; go.dataset.act = 'impProses'; go.disabled = false;
   },
   impSimpan() {
     const pilih = IMP.rows.filter(r => r.pakai);
@@ -2704,7 +2980,7 @@ document.addEventListener('change', e => {
   if (t.dataset.imp === 'pakai') { IMP.rows[+t.dataset.i].pakai = t.checked; ubahTxJumlahImpor(); return; }
   if (t.dataset.imp === 'lawan') { IMP.rows[+t.dataset.i].lawan = t.value; return; }
   if (t.dataset.jr === 'akun') { totalJr(); return; }
-  if (t.id === 'imp-file' && t.files && t.files[0]) bacaBerkasTeks(t.files[0], txt => { $('#imp-teks').value = txt; });
+  if (t.id === 'imp-file' && t.files && t.files[0]) { const f = t.files[0]; t.value = ''; impBacaBerkas(f); return; }
   if (t.id === 'pulih-file' && t.files && t.files[0]) {
     bacaBerkasTeks(t.files[0], txt => {
       try {

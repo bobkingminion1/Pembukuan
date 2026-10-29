@@ -28,4 +28,8 @@ CATATAN
  - Menghapus data situs atau cache browser ikut menghapus data pembukuan.
  - Pustaka Excel dan PDF dimuat dari internet saat aplikasi pertama kali dibuka, lalu
    tersimpan untuk pemakaian tanpa internet.
- - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama.
+ - Impor mutasi bank menerima PDF, Excel, CSV, atau teks tempel. Pembaca PDF dimuat dari internet
+   saat pertama dipakai. PDF hasil scan (gambar) tidak bisa dibaca; pakai e-statement asli dari bank.
+   Format PDF tiap bank berbeda, jadi cocokkan pratinjau dengan rekening koran sebelum dicatat.
+ - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama (index.html dan sw.js
+   wajib ikut diganti agar versi baru terpasang).
