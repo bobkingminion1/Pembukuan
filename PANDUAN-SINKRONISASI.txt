@@ -1,0 +1,106 @@
+PANDUAN SINKRONISASI DAN TIM (Supabase)
+
+Dengan sinkronisasi, pembukuan disimpan di server Supabase milik perusahaan Anda sendiri
+(gratis) dan salinannya tetap ada di tiap perangkat. Data otomatis sama di semua perangkat,
+bisa dipakai bersama tim, dan tetap bisa dibuka tanpa internet. Tiap orang masuk dengan
+emailnya sendiri. Fitur ini hanya ada di versi yang dipasang dari folder ini (bukan di
+tampilan di dalam Claude, yang sudah punya penyimpanan sendiri).
+
+
+A. SIAPKAN SERVER (pemilik, cukup sekali, sekitar 10 menit)
+   Lebih nyaman dikerjakan di laptop. Di HP, buka menu Chrome lalu centang "Situs desktop".
+
+   1. Buka supabase.com, daftar gratis, lalu pilih New project. Pilih wilayah Singapore dan
+      simpan kata sandi database yang dibuat.
+   2. Tunggu proyek selesai dibuat (sekitar 2 menit). Buka menu SQL Editor, pilih New query.
+   3. Di aplikasi pembukuan: Pengaturan > Data & Cadangan > Siapkan sinkronisasi > "Belum ada
+      server, siapkan baru". Tekan "Salin kode SQL", kembali ke SQL Editor, tempel, lalu tekan
+      Run. Hasilnya harus "Success". (Kode yang sama ada di berkas skema-sinkronisasi.sql.
+      Aman dijalankan ulang.)
+   4. Di Supabase: Authentication > Sign In / Providers > Email. Matikan "Confirm email",
+      lalu Save. Kalau dibiarkan menyala, tiap orang baru harus menekan tautan di emailnya
+      sebelum bisa masuk, dan email bawaan Supabase dibatasi jumlah kirimnya.
+   5. Tekan tombol Connect di bagian atas dasbor Supabase untuk melihat Project URL
+      (bentuknya https://kodeproyek.supabase.co). Lalu buka Project Settings > API Keys dan
+      salin Publishable key (diawali sb_publishable_), atau kunci anon di tab Legacy.
+      JANGAN pakai Secret key atau service_role: itu kunci rahasia.
+   6. Tempel Project URL dan kunci tadi di aplikasi, tekan Lanjut.
+   7. Isi email dan kata sandi (minimal 6 karakter), tekan Daftar. Lalu tekan
+      "Buat dan unggah": pembukuan yang sudah ada di perangkat ini otomatis dikirim ke server
+      dan Anda menjadi pemilik.
+
+
+B. UNDANG ANGGOTA (pemilik)
+   Pengaturan > Data & Cadangan > Anggota & undangan. Tekan Bagikan (atau Salin kode) dan
+   kirim kode sambungan (diawali PB1.) ke orang yang boleh ikut mengisi pembukuan.
+   - Kode itu berisi alamat server, kunci publik, dan kode undangan. Siapa pun yang memegangnya
+     bisa mendaftar dan bergabung sebagai editor, jadi kirim lewat jalur pribadi.
+   - Bila kode bocor, tekan Ganti kode. Kode lama langsung tidak berlaku. Anggota yang sudah
+     bergabung tidak terpengaruh.
+   - Di daftar anggota, pemilik bisa mengubah peran (Editor atau Hanya lihat) dan
+     mengeluarkan anggota.
+
+
+C. BERGABUNG (anggota)
+   Buka aplikasi di perangkat Anda. Di layar awal tekan "Masukkan kode sambungan" (atau
+   Pengaturan > Data & Cadangan > Siapkan sinkronisasi > "Saya punya kode sambungan"), tempel
+   kodenya, lalu daftar dengan email Anda sendiri. Pembukuan perusahaan langsung muncul.
+   Pemilik juga memakai cara ini untuk menyambungkan perangkat keduanya.
+   Bila perangkat sudah berisi pembukuan lain, aplikasi memberi peringatan dulu karena isinya
+   akan diganti data dari server. Unduh cadangan bila perlu.
+
+
+D. PERAN
+   Pemilik : semuanya, termasuk undang, ubah peran, keluarkan anggota, hapus perusahaan.
+   Editor  : mencatat dan mengubah transaksi, jurnal, akun, dan pengaturan.
+   Hanya lihat : membaca data dan laporan, tidak bisa mengubah.
+
+
+E. CARA KERJA DAN BATAS
+   - Setiap perubahan disimpan di perangkat dulu, lalu dikirim ke server beberapa detik
+     kemudian. Perangkat lain mengambil perubahan sekitar tiap 30 detik, dan saat aplikasi
+     dibuka kembali. Tombol "Sinkronkan sekarang" memaksanya saat itu juga.
+   - Tanpa internet aplikasi tetap bisa dipakai. Perubahan menunggu lalu terkirim sendiri
+     saat online. Status terlihat di kiri bawah menu ("Offline · 3 perubahan menunggu").
+   - Dua orang yang mengubah data berbeda pada saat bersamaan digabung otomatis: transaksi
+     baru dari kedua pihak dipertahankan. Bila dua orang mengubah transaksi yang SAMA
+     sekaligus, ubahan orang yang menyimpan belakangan yang dipakai. Penghapusan menang atas
+     data yang tidak diubah orang lain, tetapi tidak menghapus data yang sedang diubah orang lain.
+   - Memulihkan cadangan, "Hapus semua data", atau mengganti dengan data contoh berlaku untuk
+     SEMUA anggota. Aplikasi memberi peringatan sebelum menjalankannya.
+   - Pengaturan seperti profil, bagan akun, saldo awal, dan aturan otomatis digabung per
+     bagian. Daftar aturan otomatis dianggap satu kesatuan, jadi bila dua orang
+     mengubahnya bersamaan, versi yang disimpan belakangan yang dipakai.
+   - Sesi masuk berlaku lama dan diperbarui otomatis. Bila sesi dicabut atau berakhir, aplikasi
+     meminta masuk lagi (tombol "Masuk lagi") dan perubahan yang sempat dibuat tidak hilang.
+   - Belum ada fitur "lupa kata sandi" di dalam aplikasi. Bila ada anggota lupa kata sandi:
+     hapus akunnya di Supabase (Authentication > Users), lalu minta ia daftar ulang dengan
+     kode sambungan yang sama. Data yang pernah ia catat tetap ada.
+
+
+F. KEAMANAN
+   - Data tiap perusahaan hanya bisa dibaca anggotanya. Aturan ini dijaga di dalam database
+     (Row Level Security), bukan hanya di aplikasi. Peran Hanya lihat juga ditegakkan di server.
+   - Kunci publik (Publishable/anon) memang boleh ada di aplikasi dan di kode sambungan.
+     Kunci Secret/service_role tidak boleh pernah dipakai di sini.
+   - Kata sandi dikelola Supabase dan tidak disimpan oleh aplikasi ini. Token masuk disimpan
+     di browser perangkat Anda, jadi jangan menyambungkan komputer umum.
+   - Data tersimpan di server pihak ketiga (Supabase). Pilih wilayah dan atur akun Supabase
+     Anda dengan kata sandi kuat serta verifikasi dua langkah.
+
+
+G. PERHATIAN PAKET GRATIS SUPABASE
+   - Proyek gratis dijeda otomatis bila tidak ada aktivitas sekitar satu minggu. Data tidak
+     hilang; buka dasbor Supabase dan tekan Restore/Resume. Pakai aplikasi minimal seminggu sekali
+     atau pertimbangkan paket berbayar untuk pemakaian serius.
+   - Paket gratis tidak menyediakan cadangan harian. Tetap unduh cadangan JSON secara berkala
+     (Pengaturan > Data & Cadangan > Unduh cadangan).
+   - Batas dan harga Supabase bisa berubah. Periksa supabase.com/pricing.
+
+
+H. BERHENTI SINKRON
+   - Putuskan di perangkat ini: perangkat berhenti sinkron, salinan data tetap ada sebagai data
+     lokal. Data di server dan perangkat lain tidak berubah.
+   - Keluar dari perusahaan (anggota) atau Hapus perusahaan (pemilik) ada di Anggota & undangan.
+     Menghapus perusahaan menghapus datanya di server untuk semua anggota. Salinan di
+     perangkat tetap ada sebagai data lokal.

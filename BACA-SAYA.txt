@@ -21,8 +21,10 @@ hosting statis yang beralamat https, lalu alamatnya dibagikan ke siapa saja.
    Play Store, HP harus mengizinkan pemasangan dari sumber lain.
 
 CATATAN
- - Data tiap pengguna tersimpan di perangkat masing-masing dan tidak dikirim ke server
-   mana pun. Tidak ada akun, dan data tidak ikut berpindah ke perangkat lain.
+ - Secara bawaan data tiap pengguna tersimpan di perangkat masing-masing dan tidak dikirim ke
+   server mana pun. Untuk data yang sama di beberapa perangkat atau dipakai bersama tim,
+   nyalakan sinkronisasi (server Supabase gratis milik Anda sendiri). Langkahnya ada di
+   PANDUAN-SINKRONISASI.txt dan di Pengaturan > Data & Cadangan.
  - Unduh cadangan secara berkala di Pengaturan > Data & Cadangan. Cadangan juga dipakai
    untuk memindahkan data ke perangkat lain (Pulihkan dari berkas).
  - Menghapus data situs atau cache browser ikut menghapus data pembukuan.
@@ -31,5 +33,9 @@ CATATAN
  - Impor mutasi bank menerima PDF, Excel, CSV, atau teks tempel. Pembaca PDF dimuat dari internet
    saat pertama dipakai. PDF hasil scan (gambar) tidak bisa dibaca; pakai e-statement asli dari bank.
    Format PDF tiap bank berbeda, jadi cocokkan pratinjau dengan rekening koran sebelum dicatat.
+ - Menu SPT Tahunan membantu menyusun perkiraan SPT Tahunan PPh Badan: koreksi fiskal, kompensasi
+   kerugian, penghasilan kena pajak, PPh terutang (tarif 22% dengan fasilitas Pasal 31E, atau PPh final
+   0,5%), kredit pajak, dan unduhan Excel. Ini alat bantu hitung, bukan pelaporan: SPT tetap diisi dan
+   dikirim lewat Coretax, sebaiknya dengan konsultan pajak. Aturan tarif bisa berubah, jadi periksa lagi.
  - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama (index.html dan sw.js
    wajib ikut diganti agar versi baru terpasang).

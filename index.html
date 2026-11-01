@@ -426,6 +426,26 @@ select.in { padding-right: 6px; }
 .kv dt { color: var(--ink-3); } .kv dd { margin: 0; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
 
+/* ----- sinkronisasi ----- */
+.sk-pilih { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.sk-pilih .btn { justify-content: flex-start; text-align: left; white-space: normal; height: auto; padding-block: 10px; }
+.sk-ol { margin: 0 0 6px; padding-left: 20px; font-size: 13px; line-height: 1.55; } .sk-ol li { margin-bottom: 6px; }
+.sk-angs { display: flex; flex-direction: column; gap: 8px; }
+.sk-ang { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.sk-ang .sk-em { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+
+/* ----- SPT tahunan ----- */
+.spt-dua { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 16px; }
+@media (max-width: 860px) { .spt-dua { grid-template-columns: 1fr; } }
+.spt-blok h3 { font-size: 14px; margin: 0 0 6px; }
+.spt-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.spt-row .in.grow { flex: 1 1 180px; min-width: 0; }
+.spt-row select.in { flex: 1 1 200px; min-width: 0; }
+.spt-cek { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.spt-cek li { display: flex; gap: 10px; align-items: flex-start; }
+.spt-cek .sk-box { flex: none; width: 16px; height: 16px; margin-top: 1px; border: 1.5px solid var(--ink-3); border-radius: 4px; }
+.spt-cek svg { flex: none; color: var(--accent); margin-top: 1px; }
+
 </style>
 </head>
 <body>
@@ -1075,9 +1095,209 @@ function buildDemo() {
 }
 
 
+/* ===== cloud.js ===== */
+/* ================= Sinkronisasi: transport Supabase =================
+   REST dan Auth dipanggil langsung lewat fetch (tanpa pustaka tambahan) supaya ikut tersimpan offline.
+   Skema server ada di sync/skema.sql dan ikut tertanam di aplikasi (SQL_SKEMA).                    */
+
+/* ----- gabung tiga arah: base = terakhir disinkron, ours = lokal sekarang, remote = server ----- */
+const kanon = v => {
+  if (Array.isArray(v)) return '[' + v.map(kanon).join(',') + ']';
+  if (v && typeof v === 'object') return '{' + Object.keys(v).sort().filter(k => v[k] !== undefined).map(k => JSON.stringify(k) + ':' + kanon(v[k])).join(',') + '}';
+  return JSON.stringify(v === undefined ? null : v);
+};
+const samaIsi = (a, b) => kanon(a) === kanon(b);
+const objPolos = v => v && typeof v === 'object' && !Array.isArray(v);
+
+/* Daftar berisi objek ber-id. Tambahan dari kedua sisi dipertahankan; yang diubah di sisi kita menang;
+   yang dihapus di satu sisi dan tidak disentuh di sisi lain ikut terhapus; edit menang atas hapus. */
+function gabungDaftar(base, ours, remote, idKey) {
+  idKey = idKey || 'id';
+  const idx = a => { const m = new Map(); (a || []).forEach(x => m.set(x[idKey], x)); return m; };
+  const B = idx(base), O = idx(ours), R = idx(remote), out = [];
+  R.forEach((r, id) => {
+    if (O.has(id)) { const o = O.get(id); out.push(B.has(id) && samaIsi(o, B.get(id)) ? r : o); }
+    else if (B.has(id)) { if (!samaIsi(r, B.get(id))) out.push(r); }
+    else out.push(r);
+  });
+  O.forEach((o, id) => {
+    if (R.has(id)) return;
+    if (!B.has(id) || !samaIsi(o, B.get(id))) out.push(o);
+  });
+  return out;
+}
+function gabungBulan(base, ours, remote) {
+  base = base || {}; ours = ours || {}; remote = remote || {};
+  return { tx: gabungDaftar(base.tx, ours.tx, remote.tx), jr: gabungDaftar(base.jr, ours.jr, remote.jr) };
+}
+// objek: per kolom/kunci; yang kita ubah menang, selain itu ikut server. Objek bersarang digabung per kunci.
+function gabungObjek(base, ours, remote, dalam) {
+  base = base || {}; ours = ours || {}; remote = remote || {};
+  const out = {};
+  new Set(Object.keys(ours).concat(Object.keys(remote))).forEach(k => {
+    const o = ours[k], r = remote[k], b = base[k];
+    if (dalam > 0 && objPolos(o) && objPolos(r) && (b === undefined || objPolos(b))) { out[k] = gabungObjek(b, o, r, dalam - 1); return; }
+    const pilih = samaIsi(o, b) ? r : o;
+    if (pilih !== undefined) out[k] = pilih;
+  });
+  return out;
+}
+function gabungConfig(base, ours, remote) {
+  base = base || {}; ours = ours || {}; remote = remote || {};
+  const out = gabungObjek(base, ours, remote, 2);
+  if (Array.isArray(ours.akun) && Array.isArray(remote.akun)) out.akun = gabungDaftar(base.akun, ours.akun, remote.akun, 'kode');
+  return out;
+}
+
+/* ----- kode sambungan: alamat proyek + kunci publik + kode undangan dalam satu teks ----- */
+function normUrl(u) {
+  u = String(u || '').trim().replace(/\s+/g, '').replace(/\/(rest|auth)\/v1.*$/, '').replace(/\/+$/, '');
+  if (!u) return '';
+  if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+  let x; try { x = new URL(u); } catch (e) { return ''; }
+  if (x.protocol === 'http:' && !/^(localhost|127\.0\.0\.1)$/.test(x.hostname)) return '';
+  return x.origin;
+}
+const b64u = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64u = s => decodeURIComponent(escape(atob(s.replace(/-/g, '+').replace(/_/g, '/'))));
+const buatKodeSambung = (url, key, kode) => 'PB1.' + b64u(JSON.stringify({ u: url, k: key, c: kode || '' }));
+function bacaKodeSambung(s) {
+  const m = /PB1\.([A-Za-z0-9_-]+)/.exec(String(s || '').replace(/\s+/g, ''));
+  if (!m) return null;
+  try {
+    const o = JSON.parse(unb64u(m[1])), url = normUrl(o.u);
+    if (!url || typeof o.k !== 'string' || o.k.length < 10) return null;
+    return { url, key: o.k, kode: String(o.c || '').toUpperCase() };
+  } catch (e) { return null; }
+}
+
+const Cloud = (() => {
+  const KEY = 'pembukuan.cloud';
+  let C = null;
+  try { const r = localStorage.getItem(KEY); C = r ? JSON.parse(r) : null; } catch (e) { C = null; }
+  const simpan = () => { try { if (C && C.pid) localStorage.setItem(KEY, JSON.stringify(C)); else localStorage.removeItem(KEY); } catch (e) { /* abaikan */ } };
+
+  class GalatCloud extends Error { constructor(msg, status, code) { super(msg); this.status = status || 0; this.code = code || ''; } }
+  const TERJEMAH = [
+    [/invalid login credentials|invalid_credentials/i, 'Email atau kata sandi salah.'],
+    [/user already registered|user_already_exists|already been registered/i, 'Email ini sudah terdaftar. Tekan Masuk.'],
+    [/password should be at least|weak_password/i, 'Kata sandi terlalu pendek atau lemah. Pakai minimal 6 karakter.'],
+    [/email not confirmed|email_not_confirmed/i, 'Email belum dikonfirmasi. Buka email dari Supabase lalu tekan tautannya, atau matikan "Confirm email" di pengaturan Supabase.'],
+    [/invalid format|validate email|email_address_invalid/i, 'Format email tidak valid.'],
+    [/rate limit|over_email_send_rate_limit|too many/i, 'Terlalu banyak percobaan. Tunggu beberapa menit lalu coba lagi.'],
+    [/signups? not allowed|signup_disabled/i, 'Pendaftaran akun baru dimatikan di proyek Supabase ini.'],
+    [/invalid api key|no api key|apikey/i, 'Kunci proyek tidak sesuai. Salin ulang Publishable key (atau kunci anon) dari Supabase.'],
+    [/could not find the function|PGRST202|schema cache/i, 'Kode SQL belum dijalankan di proyek Supabase ini. Jalankan dulu kode SQL dari aplikasi.'],
+    [/jwt expired|PGRST301/i, 'Sesi berakhir. Masuk lagi.'],
+  ];
+  const terjemah = (pesan, code) => { const s = String(pesan) + ' ' + code; for (const [re, t] of TERJEMAH) if (re.test(s)) return t; return String(pesan); };
+
+  async function http(url, opt) {
+    const ac = new AbortController(), t = setTimeout(() => ac.abort(), 20000);
+    let r;
+    try { r = await fetch(url, { method: opt.method || 'GET', headers: opt.headers, body: opt.body, signal: ac.signal, cache: 'no-store' }); }
+    catch (e) { const g = new GalatCloud('Tidak ada koneksi ke server.', 0, 'jaringan'); g.jaringan = true; throw g; }
+    finally { clearTimeout(t); }
+    const teks = await r.text();
+    let j = null; if (teks) { try { j = JSON.parse(teks); } catch (e) { j = null; } }
+    if (!r.ok) {
+      const code = String((j && (j.error_code || j.code || j.error)) || '');
+      const pesan = (j && (j.message || j.msg || j.error_description || j.error)) || ('Server menjawab ' + r.status + '.');
+      throw new GalatCloud(code === '42501' ? 'Akses ditolak. Akun Anda hanya boleh melihat data ini.' : terjemah(pesan, code), r.status, code);
+    }
+    return j;
+  }
+
+  const hdr = (denganSesi, prefer) => {
+    const h = { apikey: C.key, 'Content-Type': 'application/json' };
+    if (denganSesi && C.sesi) h.Authorization = 'Bearer ' + C.sesi.at;
+    if (prefer) h.Prefer = prefer;
+    return h;
+  };
+  function terimaSesi(j) {
+    if (!j || !j.access_token) return false;
+    C.sesi = { at: j.access_token, rt: j.refresh_token, exp: j.expires_at ? j.expires_at * 1000 : Date.now() + (j.expires_in || 3600) * 1000 };
+    if (j.user) { C.uid = j.user.id; if (j.user.email) C.email = j.user.email; }
+    simpan();
+    return true;
+  }
+  let segar = null;
+  function segarkan() {
+    if (!C || !C.sesi || !C.sesi.rt) return Promise.reject(new GalatCloud('Sesi berakhir. Masuk lagi.', 401, 'sesi'));
+    if (!segar) {
+      segar = http(C.url + '/auth/v1/token?grant_type=refresh_token', { method: 'POST', headers: hdr(false), body: JSON.stringify({ refresh_token: C.sesi.rt }) })
+        .then(j => { terimaSesi(j); })
+        .catch(e => { if (e.jaringan) throw e; C.sesi = null; simpan(); throw new GalatCloud('Sesi berakhir. Masuk lagi.', 401, 'sesi'); })
+        .finally(() => { segar = null; });
+    }
+    return segar;
+  }
+  async function req(path, o) {
+    o = o || {};
+    if (!C) throw new GalatCloud('Belum tersambung ke server.', 0, 'putus');
+    if (!C.sesi) throw new GalatCloud('Sesi berakhir. Masuk lagi.', 401, 'sesi');
+    if (C.sesi.exp - Date.now() < 60000) await segarkan();
+    const go = () => http(C.url + path, { method: o.method, headers: hdr(true, o.prefer), body: o.body === undefined ? undefined : JSON.stringify(o.body) });
+    try { return await go(); }
+    catch (e) { if (e.status === 401 && e.code !== 'sesi') { await segarkan(); return await go(); } throw e; }
+  }
+
+  const eq = v => 'eq.' + encodeURIComponent(v);
+  const rpc = (fn, args) => req('/rest/v1/rpc/' + fn, { method: 'POST', body: args || {} });
+
+  return {
+    // ----- status sambungan -----
+    get: () => C, ada: () => !!(C && C.pid), ubah(o) { C = Object.assign(C || {}, o); simpan(); }, simpan,
+    siap(url, key) { C = { url: normUrl(url), key: String(key || '').trim() }; return !!(C.url && C.key); },
+    lupa() { C = null; simpan(); },
+    // ----- akun -----
+    async cekServer() {
+      try {
+        const j = await http(C.url + '/auth/v1/settings', { headers: { apikey: C.key } });
+        return { autoKonfirmasi: j && typeof j.mailer_autoconfirm === 'boolean' ? j.mailer_autoconfirm : null, daftarMati: !!(j && j.disable_signup) };
+      } catch (e) {
+        if (e.jaringan) throw new GalatCloud('Alamat proyek tidak bisa dihubungi. Periksa alamatnya dan koneksi internet Anda.', 0, 'jaringan');
+        throw e;
+      }
+    },
+    async daftar(email, sandi) {
+      const j = await http(C.url + '/auth/v1/signup', { method: 'POST', headers: hdr(false), body: JSON.stringify({ email, password: sandi }) });
+      C.email = email;
+      return terimaSesi(j) ? { masuk: true } : { masuk: false };
+    },
+    async masuk(email, sandi) {
+      const j = await http(C.url + '/auth/v1/token?grant_type=password', { method: 'POST', headers: hdr(false), body: JSON.stringify({ email, password: sandi }) });
+      C.email = email;
+      if (!terimaSesi(j)) throw new GalatCloud('Server tidak mengirim sesi masuk.', 0, '');
+    },
+    // ----- perusahaan & tim -----
+    perusahaanSaya: () => rpc('perusahaan_saya'),
+    buatPerusahaan: nama => rpc('buat_perusahaan', { p_nama: nama }),
+    gabung: kode => rpc('gabung_perusahaan', { p_kode: kode }),
+    kodeUndangan: p => rpc('kode_undangan', { p }),
+    gantiKode: p => rpc('ganti_kode', { p }),
+    anggota: p => rpc('daftar_anggota', { p }),
+    ubahPeran: (p, u, r) => rpc('ubah_peran', { p, u, r }),
+    keluarkan: (p, u) => rpc('keluarkan', { p, u }),
+    hapusPerusahaan: p => rpc('hapus_perusahaan', { p }),
+    // ----- dokumen (config, YYYY-MM) -----
+    daftarVersi: () => req('/rest/v1/dokumen?perusahaan_id=' + eq(C.pid) + '&select=id,versi'),
+    ambil: ids => req('/rest/v1/dokumen?perusahaan_id=' + eq(C.pid) + '&select=id,data,versi' + (ids ? '&id=in.(' + ids.map(encodeURIComponent).join(',') + ')' : '')),
+    async sisip(id, data) {
+      const r = await req('/rest/v1/dokumen', { method: 'POST', prefer: 'return=representation', body: { perusahaan_id: C.pid, id, data } });
+      return r && r[0] || null;
+    },
+    async ubahDok(id, data, versi) {
+      const r = await req('/rest/v1/dokumen?perusahaan_id=' + eq(C.pid) + '&id=' + eq(id) + '&versi=' + eq(versi), { method: 'PATCH', prefer: 'return=representation', body: { data } });
+      return r && r[0] || null;
+    },
+  };
+})();
+
 /* ===== store.js ===== */
 /* ================= Penyimpanan =================
    Mode 'db'     : kapabilitas db milik artifact (tersimpan di server, ikut terbawa saat halaman diperbarui)
+   Mode 'cloud'  : sinkronisasi multi-pengguna lewat Supabase (salinan lokal tetap ada untuk offline)
    Mode 'local'  : localStorage browser (cadangan jika db tidak tersedia)
    Mode 'memory' : tanpa penyimpanan permanen                                                       */
 const Store = (() => {
@@ -1087,6 +1307,7 @@ const Store = (() => {
   const dirty = {}, inflight = {};
   const LS_KEY = 'pembukuan.v1';
   let errHandler = () => {};
+  const statusSubs = [];
   const notify = () => subs.forEach(f => { try { f(); } catch (e) { console.error(e); } });
 
   const lsGet = () => { try { const raw = localStorage.getItem(LS_KEY); return raw ? JSON.parse(raw) : null; } catch (e) { return null; } };
@@ -1105,6 +1326,7 @@ const Store = (() => {
       try { if ((await user.can('data.write')) === false) canWrite = false; } catch (e) { /* biarkan */ }
     }
     if (cap) { db = cap; mode = 'db'; await subscribe(); return; }
+    if (Cloud.ada() && lsOk()) { await mulaiCloud(); return; }
     mode = lsOk() ? 'local' : 'memory';
     const d = lsGet();
     if (d && d.config) { S.config = d.config; S.months = d.months || {}; }
@@ -1149,14 +1371,177 @@ const Store = (() => {
     catch (e) { errHandler(e); }
     finally { inflight[key] = false; }
   }
-  function persist(key) {
+  function persist(key, paksa) {
+    if (mode === 'cloud') { cl.dirty.add(key); cl.gen[key] = (cl.gen[key] || 0) + 1; if (paksa) cl.force.add(key); cacheSimpan(); jadwalSinkron(600); perbaruiStatus(); return; }
     if (mode === 'local') { if (!lsSet()) errHandler(new Error('Penyimpanan browser penuh atau dinonaktifkan. Unduh cadangan data Anda.')); return; }
     if (mode === 'db') { dirty[key] = true; pump(key); }
   }
+  const bisaTulis = () => (mode === 'cloud' ? (Cloud.get() || {}).peran !== 'pelihat' : canWrite);
   function bolehTulis() {
-    if (!canWrite) { errHandler(new Error('Akses Anda hanya untuk melihat. Minta pemilik memberi akses ubah.')); return false; }
+    if (!bisaTulis()) { errHandler(new Error('Akses Anda hanya untuk melihat. Minta pemilik memberi akses ubah.')); return false; }
     return true;
   }
+
+  /* ----- sinkronisasi cloud ----- */
+  const CK = 'pembukuan.cloud.cache';
+  const cl = { ver: {}, base: {}, dirty: new Set(), force: new Set(), gen: {}, status: 'ok', pesan: '', pesanLama: '', terakhir: null, siklus: 0 };
+  let syncing = false, again = false, timerPoll = null, timerTunda = null, cacheGalat = false;
+  const kosongBulan = () => ({ tx: [], jr: [] });
+  const ambilDoc = key => (key === 'config' ? S.config : (S.months[key] || kosongBulan()));
+  function pasangDoc(key, data) {
+    if (key === 'config') { S.config = clone(data); return; }
+    const d = { tx: clone((data && data.tx) || []), jr: clone((data && data.jr) || []) };
+    if (!d.tx.length && !d.jr.length) delete S.months[key]; else S.months[key] = d;
+  }
+  const gabungDoc = (key, b, o, r) => (key === 'config' ? gabungConfig(b, o, r) : gabungBulan(b, o, r));
+  function cacheSimpan() {
+    if (mode !== 'cloud') return;
+    try {
+      const base = {}; cl.dirty.forEach(k => { base[k] = cl.base[k] === undefined ? null : cl.base[k]; });
+      localStorage.setItem(CK, JSON.stringify({ pid: (Cloud.get() || {}).pid, config: S.config, months: S.months, ver: cl.ver, dirty: Array.from(cl.dirty), force: Array.from(cl.force), base }));
+      cacheGalat = false;
+    } catch (e) { if (!cacheGalat) { cacheGalat = true; errHandler(new Error('Penyimpanan browser penuh. Perubahan tetap dikirim ke server selama ada koneksi.')); } }
+  }
+  function cacheMuat(pid) {
+    try {
+      const d = JSON.parse(localStorage.getItem(CK));
+      if (!d || d.pid !== pid || !d.config) return false;
+      S.config = d.config; S.months = d.months || {}; cl.ver = d.ver || {};
+      cl.dirty = new Set(d.dirty || []); cl.force = new Set(d.force || []); cl.gen = {}; cl.base = {};
+      Object.keys(S.months).forEach(k => { cl.base[k] = clone(S.months[k]); });
+      cl.base.config = clone(S.config);
+      cl.dirty.forEach(k => { const b = (d.base || {})[k]; if (b === null || b === undefined) delete cl.base[k]; else cl.base[k] = b; });
+      return true;
+    } catch (e) { return false; }
+  }
+  const dalamSinkron = () => ({ status: cl.status, pesan: cl.pesan, terakhir: cl.terakhir, tunggu: cl.dirty.size, sibuk: syncing });
+  function perbaruiStatus() { statusSubs.forEach(f => { try { f(); } catch (e) { console.error(e); } }); }
+  function jadwalSinkron(ms) { clearTimeout(timerTunda); timerTunda = setTimeout(() => { sinkron(false); }, ms); }
+  function mulaiPoll() {
+    clearInterval(timerPoll);
+    if (mode !== 'cloud') return;
+    timerPoll = setInterval(() => { if (document.visibilityState !== 'hidden' && navigator.onLine !== false) sinkron(false); }, 30000);
+  }
+  async function tarikSemua() {
+    const docs = (await Cloud.ambil()) || [];
+    S.config = null; S.months = {}; cl.ver = {}; cl.base = {}; cl.dirty = new Set(); cl.force = new Set(); cl.gen = {};
+    docs.forEach(d => { pasangDoc(d.id, d.data); cl.ver[d.id] = d.versi; cl.base[d.id] = clone(d.data); });
+    cacheSimpan();
+  }
+  async function mulaiCloud() {
+    mode = 'cloud';
+    const pid = Cloud.get().pid;
+    if (!cacheMuat(pid)) {
+      try { await tarikSemua(); }
+      catch (e) { loadError = e.message || 'Gagal membaca data'; cl.status = e.jaringan ? 'offline' : (e.code === 'sesi' ? 'masuk' : 'galat'); cl.pesan = loadError; }
+    }
+    ready = true; mulaiPoll(); notify();
+    if (S.config || !loadError) sinkron(true);
+  }
+  // true bila ada dokumen yang diganti dari server
+  function tarikDoc(d) {
+    const key = d.id;
+    let ganti = true;
+    if (cl.dirty.has(key)) pasangDoc(key, gabungDoc(key, cl.base[key], ambilDoc(key), d.data));
+    else if (S.config !== null && samaIsi(ambilDoc(key), d.data)) ganti = false;
+    else pasangDoc(key, d.data);
+    cl.ver[key] = d.versi; cl.base[key] = clone(d.data);
+    return ganti;
+  }
+  async function segarkanPeran() {
+    const c = Cloud.get(), daftar = (await Cloud.perusahaanSaya()) || [], p = daftar.find(x => x.id === c.pid);
+    if (!p) { const g = new Error('Anda tidak lagi menjadi anggota perusahaan ini. Data di perangkat ini dijadikan data lokal.'); g.code = 'dikeluarkan'; throw g; }
+    if (p.peran !== c.peran || p.nama !== c.nama) { Cloud.ubah({ peran: p.peran, nama: p.nama }); notify(); }
+  }
+  // kirim satu dokumen; bila bentrok gabungkan dengan versi server lalu coba lagi
+  async function dorong(key) {
+    if (key === 'config' && !S.config) { cl.dirty.delete(key); return false; }
+    let berubah = false;
+    for (let coba = 0; coba < 6; coba++) {
+      const gen0 = cl.gen[key] || 0, ours = clone(ambilDoc(key)), paksa = cl.force.has(key), baru = cl.ver[key] == null;
+      if (!paksa && !baru && samaIsi(ours, cl.base[key])) { cl.dirty.delete(key); return berubah; }
+      if (baru && key !== 'config' && !ours.tx.length && !ours.jr.length) { cl.dirty.delete(key); cl.force.delete(key); return berubah; }
+      let res = null;
+      try { res = baru ? await Cloud.sisip(key, ours) : await Cloud.ubahDok(key, ours, cl.ver[key]); }
+      catch (e) { if (!(baru && e.status === 409)) throw e; }
+      if (res) {
+        cl.ver[key] = res.versi; cl.base[key] = clone(ours); cl.force.delete(key);
+        if ((cl.gen[key] || 0) === gen0) cl.dirty.delete(key);
+        return berubah;
+      }
+      const rem = ((await Cloud.ambil([key])) || [])[0];
+      if (!rem) { cl.ver[key] = null; continue; }
+      if (!baru && rem.versi === cl.ver[key]) { const g = new Error('Akses Anda hanya untuk melihat, jadi perubahan tidak tersimpan.'); g.code = '42501'; throw g; }
+      if (!paksa) { pasangDoc(key, gabungDoc(key, cl.base[key], ambilDoc(key), rem.data)); berubah = true; }
+      cl.ver[key] = rem.versi; cl.base[key] = clone(rem.data);
+    }
+    throw new Error('Data bentrok dengan perubahan orang lain. Coba sinkronkan lagi.');
+  }
+  // satu sinkronisasi berjalan pada satu waktu; permintaan yang datang saat berjalan ikut menunggu hasilnya
+  let jalan = null, peranMinta = false;
+  function sinkron(manual) {
+    if (mode !== 'cloud' || !Cloud.ada()) return Promise.resolve(false);
+    if (syncing) { again = true; if (manual) peranMinta = true; return jalan; }
+    jalan = sinkronIsi(manual);
+    return jalan;
+  }
+  async function sinkronIsi(manual) {
+    syncing = true; cl.status = 'sinkron'; perbaruiStatus();
+    let berubah = false, ok = false;
+    try {
+      do {
+        again = false; cl.siklus++;
+        if (manual || peranMinta || cl.siklus % 10 === 1) { peranMinta = false; await segarkanPeran(); }
+        const rem = (await Cloud.daftarVersi()) || [];
+        for (const key of Array.from(cl.dirty)) { if (await dorong(key)) berubah = true; }
+        const usang = rem.filter(r => !cl.dirty.has(r.id) && cl.ver[r.id] !== r.versi).map(r => r.id);
+        if (usang.length) ((await Cloud.ambil(usang)) || []).forEach(d => { if (tarikDoc(d)) berubah = true; });
+      } while (again);
+      cl.status = 'ok'; cl.pesan = ''; cl.pesanLama = ''; cl.terakhir = new Date(); loadError = ''; ok = true;
+    } catch (e) {
+      if (e.code === 'dikeluarkan') { syncing = false; putuskan(); errHandler(e); return false; }
+      if (e.jaringan) { cl.status = 'offline'; cl.pesan = e.message; }
+      else if (e.code === 'sesi') { cl.status = 'masuk'; cl.pesan = e.message; }
+      else if (e.code === '42501') {
+        cl.status = 'galat'; cl.pesan = e.message;
+        try { await segarkanPeran(); const d = (await Cloud.ambil()) || []; cl.dirty = new Set(); cl.force = new Set(); d.forEach(x => { tarikDoc(x); }); berubah = true; } catch (e2) { /* biarkan */ }
+        errHandler(e);
+      } else { cl.status = 'galat'; cl.pesan = e.message || 'Sinkronisasi gagal.'; if (cl.pesan !== cl.pesanLama) errHandler(new Error(cl.pesan)); cl.pesanLama = cl.pesan; }
+    } finally { syncing = false; cacheSimpan(); perbaruiStatus(); if (berubah) notify(); }
+    return ok;
+  }
+  async function hubungkan(info, unggahLokal) {
+    const modeLama = mode, salinan = { config: S.config ? clone(S.config) : null, months: clone(S.months) };
+    Cloud.ubah({ pid: info.pid, nama: info.nama, peran: info.peran });
+    mode = 'cloud'; cl.ver = {}; cl.base = {}; cl.dirty = new Set(); cl.force = new Set(); cl.gen = {}; cl.status = 'ok'; cl.pesan = ''; loadError = '';
+    try {
+      if (unggahLokal && S.config) { cl.dirty.add('config'); Object.keys(S.months).forEach(k => cl.dirty.add(k)); cacheSimpan(); }
+      else await tarikSemua();
+    } catch (e) {
+      Cloud.ubah({ pid: null, nama: null, peran: null }); mode = modeLama; S.config = salinan.config; S.months = salinan.months;
+      throw e;
+    }
+    ready = true; mulaiPoll(); notify();
+    return sinkron(true);
+  }
+  function putuskan() {
+    if (mode !== 'cloud') return;
+    clearInterval(timerPoll); clearTimeout(timerTunda);
+    Cloud.lupa();
+    try { localStorage.removeItem(CK); } catch (e) { /* abaikan */ }
+    cl.dirty = new Set(); cl.force = new Set(); cl.ver = {}; cl.base = {}; loadError = '';
+    mode = lsOk() ? 'local' : 'memory';
+    if (mode === 'local') lsSet();
+    notify(); perbaruiStatus();
+  }
+  async function muatUlang() {
+    try { await tarikSemua(); loadError = ''; cl.status = 'ok'; cl.pesan = ''; }
+    catch (e) { loadError = e.message; cl.status = e.jaringan ? 'offline' : 'galat'; cl.pesan = e.message; }
+    notify(); perbaruiStatus();
+  }
+  document.addEventListener('visibilitychange', () => { if (mode === 'cloud' && document.visibilityState === 'visible') sinkron(true); });
+  window.addEventListener('online', () => { if (mode === 'cloud') sinkron(true); });
+  window.addEventListener('offline', () => { if (mode === 'cloud') { cl.status = 'offline'; perbaruiStatus(); } });
 
   const bucket = ym => (S.months[ym] = S.months[ym] || { tx: [], jr: [] });
   const cari = (id, jenis) => {
@@ -1182,19 +1567,20 @@ const Store = (() => {
 
   return {
     S, init,
-    get mode() { return mode; }, get ready() { return ready; }, get canWrite() { return canWrite; }, get loadError() { return loadError; },
-    onChange: f => subs.push(f), onError: f => { errHandler = f; },
+    get mode() { return mode; }, get ready() { return ready; }, get canWrite() { return bisaTulis(); }, get loadError() { return loadError; },
+    onChange: f => subs.push(f), onError: f => { errHandler = f; }, onStatus: f => statusSubs.push(f),
+    cloud: { info: dalamSinkron, hubungkan, putuskan, sinkronkan: () => sinkron(true), muatUlang, peranTerbaru: segarkanPeran },
     simpanTx(t) { if (!bolehTulis()) return false; simpanItem('tx', t); notify(); return true; },
     hapusTx(id) { if (!bolehTulis()) return false; hapusItem('tx', id); notify(); return true; },
     simpanTxBanyak(list) { if (!bolehTulis()) return false; list.forEach(t => simpanItem('tx', t)); notify(); return true; },
     simpanJr(j) { if (!bolehTulis()) return false; simpanItem('jr', j); notify(); return true; },
     hapusJr(id) { if (!bolehTulis()) return false; hapusItem('jr', id); notify(); return true; },
-    ubahConfig(fn) { if (!bolehTulis()) return false; fn(S.config); persist('config'); notify(); return true; },
+    ubahConfig(fn, diam) { if (!bolehTulis()) return false; fn(S.config); persist('config'); if (!diam) notify(); return true; },
     gantiSemua(cfg, months) {
       if (!bolehTulis()) return false;
       const keys = new Set(Object.keys(S.months).concat(Object.keys(months || {})));
       S.config = cfg; S.months = months || {};
-      keys.forEach(k => persist(k)); persist('config'); notify();
+      keys.forEach(k => persist(k, true)); persist('config', true); notify();
       return true;
     },
     cadangan() { return { aplikasi: 'Pembukuan Perusahaan', versi: 1, dibuat: new Date().toISOString(), config: S.config, months: S.months }; },
@@ -1369,6 +1755,7 @@ const PAGES = [
   { id: 'laporan', t: 'Laporan Keuangan', ic: 'laporan' },
   { id: 'rekap', t: 'Rekap Bulanan', ic: 'rekap' },
   { id: 'tahunan', t: 'Laporan Tahunan', ic: 'tahunan' },
+  { id: 'spt', t: 'SPT Tahunan', ic: 'laporan' },
   { sep: 1 },
   { id: 'pengaturan', t: 'Pengaturan', ic: 'setelan' },
 ];
@@ -1451,10 +1838,11 @@ function kerangka(isi) {
     mode === 'local' ? '<span class="status"><span class="dot warn"></span>Tersimpan di browser ini</span><br>Unduh cadangan secara berkala di Pengaturan.' :
       '<span class="status"><span class="dot warn"></span>Belum tersimpan permanen</span><br>Unduh cadangan sebelum menutup halaman.';
   const ro = Store.canWrite ? '' : '<br><b>Mode lihat saja.</b>';
+  const kaki = mode === 'cloud' ? statusKakiSink() : status;
   const p = M.cfg.perusahaan;
   return '<div class="app"><aside class="side"><div class="side-in">' +
     '<div class="brand"><div class="brand-mark">' + IC.logo + '</div><div><div class="brand-t">Pembukuan</div><div class="brand-s">' + esc((p.bentuk ? p.bentuk + ' ' : '') + p.nama) + '</div></div></div>' +
-    '<nav class="nav" aria-label="Menu utama">' + nav + '</nav><div class="side-foot">' + status + ro + '</div></div></aside>' +
+    '<nav class="nav" aria-label="Menu utama">' + nav + '</nav><div class="side-foot">' + kaki + ro + '</div></div></aside>' +
     '<div class="main"><div class="main-in">' + isi + '</div></div></div>';
 }
 function kepala(judul, sub, kanan, tanpaTahun) {
@@ -1475,15 +1863,16 @@ function render() {
   M = buatModel(Store.S);
   pastikanTahun();
   const f = document.activeElement;
-  const fokus = f && f.id && app.contains(f) ? { id: f.id, a: f.selectionStart, b: f.selectionEnd } : null;
+  const teksIsi = f && f.tagName === 'INPUT' && /^(text|search|tel|url|email|number)?$/.test(f.type || '') || (f && f.tagName === 'TEXTAREA');
+  const fokus = f && f.id && app.contains(f) ? { id: f.id, a: f.selectionStart, b: f.selectionEnd, v: teksIsi ? f.value : null } : null;
   const sy = window.scrollY;
-  const views = { ringkasan: vRingkasan, 'kas-bank': vKas, jurnal: vJurnal, laporan: vLaporan, rekap: vRekap, tahunan: vTahunan, pengaturan: vPengaturan };
+  const views = { ringkasan: vRingkasan, 'kas-bank': vKas, jurnal: vJurnal, laporan: vLaporan, rekap: vRekap, tahunan: vTahunan, spt: vSpt, pengaturan: vPengaturan };
   if (!views[UI.page]) UI.page = 'ringkasan';
   app.innerHTML = kerangka(bannerDemo() + views[UI.page]());
   setelahRender.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
   if (fokus) {
     const el = document.getElementById(fokus.id);
-    if (el) { el.focus(); try { if (fokus.a != null) el.setSelectionRange(fokus.a, fokus.b); } catch (e) { /* tipe tanpa seleksi */ } }
+    if (el) { el.focus(); if (fokus.v != null && el.value !== fokus.v) el.value = fokus.v; try { if (fokus.a != null) el.setSelectionRange(fokus.a, fokus.b); } catch (e) { /* tipe tanpa seleksi */ } }
   }
   if (Math.abs(window.scrollY - sy) > 1) window.scrollTo(0, sy);
 }
@@ -1491,6 +1880,7 @@ function render() {
 /* ================= Selamat datang ================= */
 function vSelamatDatang() {
   const th = new Date().getFullYear();
+  if (Store.mode === 'cloud' && Store.loadError) return '<div class="main-in"><div class="empty" style="padding:96px 16px"><b>Data belum bisa dimuat dari server.</b>' + esc(Store.loadError) + '<div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:16px"><button class="btn pri" data-act="skUlang">Coba lagi</button><button class="btn" data-act="masukLagi">Masuk lagi</button><button class="btn" data-act="putuskanSink">Putuskan sinkronisasi</button></div></div></div>';
   if (!Store.canWrite) return '<div class="main-in"><div class="empty" style="padding:96px 16px"><b>Belum ada data pembukuan.</b>Pemilik halaman ini belum mengisi data. Minta pemilik membuka halaman ini lebih dulu.</div></div>';
   const cek = t => '<li>' + IC.cek + '<span>' + t + '</span></li>';
   return '<div class="main-in" style="margin-inline:auto"><div class="hello"><div>' +
@@ -1506,7 +1896,8 @@ function vSelamatDatang() {
     '<div class="fld"><label class="lbl" for="w-bentuk">Bentuk usaha</label><select class="in" id="w-bentuk">' + ['PT', 'CV', 'UD', 'Firma', 'Koperasi', 'Yayasan', ''].map(b => opt(b, b || 'Perorangan / lainnya', 'PT')).join('') + '</select></div>' +
     '<div class="fld"><label class="lbl" for="w-tahun">Mulai dari tahun</label><input class="in" id="w-tahun" inputmode="numeric" value="' + th + '"></div></div>' +
     '<div id="w-err" class="hint neg" style="margin-top:8px"></div>' +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px"><button class="btn pri" data-act="mulaiBaru">Buat pembukuan</button><button class="btn" data-act="muatContoh">Lihat dulu dengan data contoh</button></div></div></div></div>';
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px"><button class="btn pri" data-act="mulaiBaru">Buat pembukuan</button><button class="btn" data-act="muatContoh">Lihat dulu dengan data contoh</button></div>' +
+    (Store.mode === 'db' || Store.mode === 'cloud' ? '' : '<div class="note" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">Diundang ke pembukuan yang sudah ada? <button class="btn sm" data-act="bukaSink" data-l="kode">Masukkan kode sambungan</button></div>') + '</div></div></div>';
 }
 
 /* ================= Ringkasan ================= */
@@ -2095,6 +2486,265 @@ function tampilImpor() {
 }
 function ubahTxJumlahImpor() { const n = IMP.rows.filter(r => r.pakai).length; const go = $('#imp-go'); if (go) { go.textContent = 'Catat ' + n + ' transaksi'; go.disabled = !n; } }
 
+/* ===== sync.js ===== */
+const SQL_SKEMA = "-- Pembukuan Perusahaan - skema sinkronisasi (Supabase)\n-- Jalankan SEKALI: Supabase > SQL Editor > New query > tempel semua > Run.\n-- Aman dijalankan ulang; data yang sudah ada tidak dihapus.\n\n-- ---------- Tabel ----------\ncreate table if not exists public.perusahaan (\n  id uuid primary key default gen_random_uuid(),\n  nama text not null check (char_length(nama) between 1 and 200),\n  dibuat timestamptz not null default now()\n);\n\ncreate table if not exists public.undangan (\n  perusahaan_id uuid primary key references public.perusahaan(id) on delete cascade,\n  kode text not null unique\n);\n\ncreate table if not exists public.anggota (\n  perusahaan_id uuid not null references public.perusahaan(id) on delete cascade,\n  user_id uuid not null references auth.users(id) on delete cascade,\n  email text not null,\n  peran text not null check (peran in ('pemilik', 'editor', 'pelihat')),\n  bergabung timestamptz not null default now(),\n  primary key (perusahaan_id, user_id)\n);\n\ncreate table if not exists public.dokumen (\n  perusahaan_id uuid not null references public.perusahaan(id) on delete cascade,\n  id text not null check (id = 'config' or id ~ '^[0-9]{4}-[0-9]{2}$'),\n  data jsonb not null check (octet_length(data::text) <= 3000000),\n  versi integer not null default 1,\n  diubah timestamptz not null default now(),\n  diubah_oleh uuid,\n  primary key (perusahaan_id, id)\n);\n\n-- ---------- Fungsi bantu ----------\ncreate or replace function public.peran_saya(p uuid)\nreturns text language sql stable security definer set search_path = public as $$\n  select peran from public.anggota where perusahaan_id = p and user_id = auth.uid()\n$$;\n\ncreate or replace function public.kode_baru()\nreturns text language sql volatile set search_path = public as $$\n  select upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 12))\n$$;\n\n-- versi naik otomatis tiap perubahan; klien tidak bisa menentukannya sendiri\ncreate or replace function public.dokumen_versi()\nreturns trigger language plpgsql set search_path = public as $$\nbegin\n  if tg_op = 'INSERT' then\n    new.versi := 1;\n  else\n    new.versi := old.versi + 1;\n    new.perusahaan_id := old.perusahaan_id;\n    new.id := old.id;\n  end if;\n  new.diubah := now();\n  new.diubah_oleh := auth.uid();\n  return new;\nend $$;\n\ndrop trigger if exists dokumen_versi on public.dokumen;\ncreate trigger dokumen_versi before insert or update on public.dokumen\n  for each row execute function public.dokumen_versi();\n\n-- ---------- Fungsi yang dipanggil aplikasi ----------\ncreate or replace function public.buat_perusahaan(p_nama text)\nreturns uuid language plpgsql security definer set search_path = public as $$\ndeclare pid uuid;\nbegin\n  if auth.uid() is null then raise exception 'Anda belum masuk.'; end if;\n  if coalesce(trim(p_nama), '') = '' then raise exception 'Nama perusahaan wajib diisi.'; end if;\n  insert into public.perusahaan(nama) values (left(trim(p_nama), 200)) returning id into pid;\n  insert into public.anggota(perusahaan_id, user_id, email, peran)\n    values (pid, auth.uid(), coalesce(auth.jwt() ->> 'email', ''), 'pemilik');\n  insert into public.undangan(perusahaan_id, kode) values (pid, public.kode_baru());\n  return pid;\nend $$;\n\ncreate or replace function public.gabung_perusahaan(p_kode text)\nreturns uuid language plpgsql security definer set search_path = public as $$\ndeclare pid uuid;\nbegin\n  if auth.uid() is null then raise exception 'Anda belum masuk.'; end if;\n  select perusahaan_id into pid from public.undangan where kode = upper(trim(p_kode));\n  if pid is null then raise exception 'Kode undangan tidak dikenal atau sudah diganti pemilik.'; end if;\n  insert into public.anggota(perusahaan_id, user_id, email, peran)\n    values (pid, auth.uid(), coalesce(auth.jwt() ->> 'email', ''), 'editor')\n    on conflict (perusahaan_id, user_id) do nothing;\n  return pid;\nend $$;\n\ncreate or replace function public.perusahaan_saya()\nreturns table(id uuid, nama text, peran text) language sql stable security definer set search_path = public as $$\n  select p.id, p.nama, a.peran\n  from public.perusahaan p join public.anggota a on a.perusahaan_id = p.id\n  where a.user_id = auth.uid()\n  order by a.bergabung\n$$;\n\ncreate or replace function public.kode_undangan(p uuid)\nreturns text language plpgsql stable security definer set search_path = public as $$\ndeclare k text;\nbegin\n  if public.peran_saya(p) is distinct from 'pemilik' then raise exception 'Hanya pemilik yang bisa melihat kode undangan.'; end if;\n  select kode into k from public.undangan where perusahaan_id = p;\n  return k;\nend $$;\n\ncreate or replace function public.ganti_kode(p uuid)\nreturns text language plpgsql security definer set search_path = public as $$\ndeclare k text := public.kode_baru();\nbegin\n  if public.peran_saya(p) is distinct from 'pemilik' then raise exception 'Hanya pemilik yang bisa mengganti kode undangan.'; end if;\n  update public.undangan set kode = k where perusahaan_id = p;\n  return k;\nend $$;\n\ncreate or replace function public.daftar_anggota(p uuid)\nreturns table(user_id uuid, email text, peran text) language plpgsql stable security definer set search_path = public as $$\nbegin\n  if public.peran_saya(p) is null then raise exception 'Anda bukan anggota perusahaan ini.'; end if;\n  return query select a.user_id, a.email, a.peran from public.anggota a where a.perusahaan_id = p order by a.bergabung;\nend $$;\n\ncreate or replace function public.ubah_peran(p uuid, u uuid, r text)\nreturns void language plpgsql security definer set search_path = public as $$\nbegin\n  if public.peran_saya(p) is distinct from 'pemilik' then raise exception 'Hanya pemilik yang bisa mengubah peran.'; end if;\n  if r not in ('editor', 'pelihat') then raise exception 'Peran tidak dikenal.'; end if;\n  if u = auth.uid() then raise exception 'Peran pemilik tidak bisa diubah.'; end if;\n  update public.anggota set peran = r where perusahaan_id = p and user_id = u;\nend $$;\n\ncreate or replace function public.keluarkan(p uuid, u uuid)\nreturns void language plpgsql security definer set search_path = public as $$\ndeclare me text := public.peran_saya(p);\nbegin\n  if me is null then raise exception 'Anda bukan anggota perusahaan ini.'; end if;\n  if u = auth.uid() then\n    if me = 'pemilik' then raise exception 'Pemilik tidak bisa keluar. Hapus perusahaan bila tidak dipakai lagi.'; end if;\n  elsif me <> 'pemilik' then\n    raise exception 'Hanya pemilik yang bisa mengeluarkan anggota.';\n  end if;\n  delete from public.anggota where perusahaan_id = p and user_id = u;\nend $$;\n\ncreate or replace function public.hapus_perusahaan(p uuid)\nreturns void language plpgsql security definer set search_path = public as $$\nbegin\n  if public.peran_saya(p) is distinct from 'pemilik' then raise exception 'Hanya pemilik yang bisa menghapus perusahaan.'; end if;\n  delete from public.perusahaan where id = p;\nend $$;\n\n-- ---------- Keamanan ----------\nalter table public.perusahaan enable row level security;\nalter table public.undangan enable row level security;\nalter table public.anggota enable row level security;\nalter table public.dokumen enable row level security;\n\ndrop policy if exists dokumen_baca on public.dokumen;\ndrop policy if exists dokumen_tambah on public.dokumen;\ndrop policy if exists dokumen_ubah on public.dokumen;\ncreate policy dokumen_baca on public.dokumen for select to authenticated\n  using (public.peran_saya(perusahaan_id) is not null);\ncreate policy dokumen_tambah on public.dokumen for insert to authenticated\n  with check (public.peran_saya(perusahaan_id) in ('pemilik', 'editor'));\ncreate policy dokumen_ubah on public.dokumen for update to authenticated\n  using (public.peran_saya(perusahaan_id) in ('pemilik', 'editor'))\n  with check (public.peran_saya(perusahaan_id) in ('pemilik', 'editor'));\n\nrevoke all on public.perusahaan, public.undangan, public.anggota, public.dokumen from anon, authenticated;\ngrant select, insert, update on public.dokumen to authenticated;\n\nrevoke all on function\n  public.peran_saya(uuid), public.kode_baru(), public.buat_perusahaan(text), public.gabung_perusahaan(text),\n  public.perusahaan_saya(), public.kode_undangan(uuid), public.ganti_kode(uuid), public.daftar_anggota(uuid),\n  public.ubah_peran(uuid, uuid, text), public.keluarkan(uuid, uuid), public.hapus_perusahaan(uuid)\n  from public, anon, authenticated;\ngrant execute on function\n  public.peran_saya(uuid), public.buat_perusahaan(text), public.gabung_perusahaan(text),\n  public.perusahaan_saya(), public.kode_undangan(uuid), public.ganti_kode(uuid), public.daftar_anggota(uuid),\n  public.ubah_peran(uuid, uuid, text), public.keluarkan(uuid, uuid), public.hapus_perusahaan(uuid)\n  to authenticated;\n";
+/* ================= Sinkronisasi: antarmuka ================= */
+const SK = { url: '', key: '', kode: '', daftar: [], masukLagi: false, dipilih: null };
+let skJalan = false;
+
+const skPesan = (t, galat) => { const e = $('#sk-err'); if (e) { e.textContent = t || ''; e.className = 'hint' + (galat === false ? ' ok' : ' neg'); } };
+function skJalankan(fn) {
+  if (skJalan) return Promise.resolve();
+  skJalan = true;
+  const b = $('#sk-go'), lama = b ? b.textContent : '';
+  if (b) { b.disabled = true; b.textContent = 'Memproses…'; }
+  skPesan('');
+  return Promise.resolve().then(fn).catch(e => { skPesan((e && e.message) || 'Terjadi kesalahan.'); })
+    .finally(() => { skJalan = false; const b2 = $('#sk-go'); if (b2) { b2.disabled = false; b2.textContent = lama; } });
+}
+async function salinTeks(t) {
+  try { if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(t); return true; } } catch (e) { /* coba cara lama */ }
+  try {
+    const ta = document.createElement('textarea'); ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  } catch (e) { return false; }
+}
+const dataLokalAda = () => !!(Store.S.config && !Store.S.config.demo);
+const jmlTxLokal = () => Object.keys(Store.S.months).reduce((n, k) => n + (Store.S.months[k].tx || []).length + (Store.S.months[k].jr || []).length, 0);
+const hostSink = () => { const c = Cloud.get(); try { return c && c.url ? new URL(c.url).host : ''; } catch (e) { return ''; } };
+const catatCloud = () => (Store.mode === 'cloud' ? '<br><br><b>Perubahan ini berlaku untuk semua anggota perusahaan.</b>' : '');
+const PERAN_LABEL = { pemilik: 'Pemilik', editor: 'Editor', pelihat: 'Hanya lihat' };
+
+/* ----- teks status (dipakai panel pengaturan dan kaki menu) ----- */
+function teksStatusSink() {
+  const s = Store.cloud.info(), jam = s.terakhir ? s.terakhir.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) : '';
+  const tunggu = s.tunggu ? s.tunggu + ' perubahan menunggu dikirim' : '';
+  if (s.status === 'sinkron') return 'Menyinkronkan…';
+  if (s.status === 'offline') return 'Offline' + (tunggu ? ' · ' + tunggu : ' · data tersimpan di perangkat ini');
+  if (s.status === 'masuk') return 'Perlu masuk lagi';
+  if (s.status === 'galat') return 'Gagal sinkron' + (s.pesan ? ': ' + s.pesan : '');
+  return tunggu || ('Tersinkron' + (jam ? ' · ' + jam : ''));
+}
+const statusSinkOk = () => { const s = Store.cloud.info(); return s.status === 'ok' || s.status === 'sinkron'; };
+function perbaruiStatusDom() {
+  document.querySelectorAll('[data-sync-st]').forEach(el => { el.textContent = teksStatusSink(); });
+  const ok = statusSinkOk();
+  document.querySelectorAll('[data-sync-dot]').forEach(el => { el.classList.toggle('warn', !ok); });
+}
+Store.onStatus(perbaruiStatusDom);
+function statusKakiSink() {
+  const c = Cloud.get() || {};
+  return '<span class="status"><span class="dot' + (statusSinkOk() ? '' : ' warn') + '" data-sync-dot></span><span data-sync-st>' + esc(teksStatusSink()) + '</span></span><br>' +
+    esc(c.email || '') + ' · ' + esc(PERAN_LABEL[c.peran] || '');
+}
+
+/* ----- panel di Pengaturan > Data & Cadangan ----- */
+function vSinkron() {
+  if (Store.mode === 'db') return '';
+  if (Store.mode !== 'cloud') {
+    return '<div class="panel"><div class="panel-h"><h2>Sinkronisasi &amp; tim</h2></div>' +
+      '<p class="note" style="margin-bottom:12px">Pakai pembukuan yang sama di beberapa perangkat atau bersama tim. Data disimpan di server Supabase milik Anda sendiri (gratis), dan tetap bisa dipakai tanpa internet.</p>' +
+      '<button class="btn pri" data-act="bukaSink">Siapkan sinkronisasi</button></div>';
+  }
+  const c = Cloud.get(), s = Store.cloud.info();
+  return '<div class="panel"><div class="panel-h"><h2>Sinkronisasi &amp; tim</h2></div>' +
+    '<dl class="kv"><dt>Perusahaan</dt><dd>' + esc(c.nama || '') + '</dd><dt>Akun</dt><dd style="overflow-wrap:anywhere">' + esc(c.email || '') + '</dd><dt>Peran</dt><dd>' + esc(PERAN_LABEL[c.peran] || '') + '</dd>' +
+    '<dt>Server</dt><dd style="overflow-wrap:anywhere">' + esc(hostSink()) + '</dd><dt>Status</dt><dd data-sync-st>' + esc(teksStatusSink()) + '</dd></dl>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">' +
+    (s.status === 'masuk' ? '<button class="btn pri" data-act="masukLagi">Masuk lagi</button>' : '<button class="btn" data-act="sinkronSekarang">Sinkronkan sekarang</button>') +
+    '<button class="btn" data-act="bukaAnggota">Anggota &amp; undangan</button>' +
+    '<button class="btn" data-act="putuskanSink">Putuskan di perangkat ini</button></div></div>';
+}
+
+/* ----- modal pengaturan sambungan ----- */
+const SKLB = (id, lb, extra) => '<div class="fld"><label class="lbl" for="' + id + '">' + lb + '</label>' + extra + '</div>';
+function skTampil(l) {
+  const batal = '<button class="btn" data-act="tutupModal">Batal</button>';
+  const kembali = (ke) => '<button class="btn" data-act="skLangkah" data-l="' + ke + '">Kembali</button><span class="sp"></span>';
+  const galat = '<div class="hint neg" id="sk-err" role="alert" style="margin-top:8px"></div>';
+  let o;
+  if (l === 'kode') {
+    o = { judul: 'Masukkan kode sambungan', isi: '<p class="note" style="margin-bottom:10px">Tempel kode yang dikirim pemilik pembukuan (diawali <b>PB1.</b>). Pemilik bisa melihatnya di Pengaturan &gt; Data &amp; Cadangan &gt; Anggota &amp; undangan.</p>' +
+      SKLB('sk-kode', 'Kode sambungan', '<textarea class="in mono" id="sk-kode" rows="4" placeholder="PB1.…" autocomplete="off" autocapitalize="off" spellcheck="false">' + esc(SK.mentah || '') + '</textarea>') + galat,
+      tombol: kembali('awal') + '<button class="btn pri" id="sk-go" data-act="skKode">Lanjut</button>' };
+  } else if (l === 'pemilik') {
+    o = { judul: 'Siapkan server Supabase', lebar: true, isi: '<ol class="sk-ol">' +
+      '<li>Buka <b>supabase.com</b>, daftar gratis, lalu pilih <b>New project</b>. Pilih wilayah Singapore dan simpan kata sandi database yang dibuat.</li>' +
+      '<li>Di menu <b>SQL Editor</b> pilih New query, tempel kode SQL dari tombol di bawah, lalu tekan <b>Run</b>. Hasilnya harus "Success".</li>' +
+      '<li>Di menu <b>Authentication</b> &gt; <b>Sign In / Providers</b> &gt; <b>Email</b>, matikan <b>Confirm email</b>, lalu Save. Bila dibiarkan menyala, tiap anggota baru harus mengonfirmasi lewat email.</li>' +
+      '<li>Tekan tombol <b>Connect</b> di bagian atas dasbor untuk melihat <b>Project URL</b> (bentuknya https://kodeproyek.supabase.co). Lalu buka <b>Project Settings</b> &gt; <b>API Keys</b> dan salin <b>Publishable key</b> (diawali sb_publishable_), atau kunci <b>anon</b> di tab Legacy. Tempel keduanya di bawah. Jangan pakai <b>Secret key</b> atau <b>service_role</b>.</li></ol>' +
+      '<div style="margin:10px 0"><button class="btn" data-act="skSalinSql">Salin kode SQL</button></div>' +
+      '<details style="margin-bottom:12px"><summary class="note" style="cursor:pointer">Lihat kode SQL</summary><textarea class="in mono" readonly rows="8" style="margin-top:8px;font-size:11px">' + esc(SQL_SKEMA) + '</textarea></details>' +
+      '<div class="grid2">' + SKLB('sk-url', 'Project URL', '<input class="in" id="sk-url" inputmode="url" placeholder="https://xxxx.supabase.co" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(SK.url || '') + '">') +
+      SKLB('sk-key', 'Publishable key (atau anon)', '<input class="in mono" id="sk-key" placeholder="eyJ… atau sb_publishable_…" autocomplete="off" autocapitalize="off" spellcheck="false" value="' + esc(SK.key || '') + '">') + '</div>' + galat,
+      tombol: kembali('awal') + '<button class="btn pri" id="sk-go" data-act="skPemilik">Lanjut</button>' };
+  } else if (l === 'akun') {
+    o = { judul: SK.masukLagi ? 'Masuk lagi' : 'Masuk atau daftar', isi: '<p class="note" style="margin-bottom:10px">Server: <b>' + esc(hostSink() || SK.hostTampil || '') + '</b>. Baru pertama kali? Isi email dan kata sandi (minimal 6 karakter), lalu tekan <b>Daftar</b>.</p><div class="grid2">' +
+      SKLB('sk-email', 'Email', '<input class="in" id="sk-email" type="email" inputmode="email" autocomplete="email" autocapitalize="off" value="' + esc(SK.email || '') + '">') +
+      SKLB('sk-sandi', 'Kata sandi', '<input class="in" id="sk-sandi" type="password" autocomplete="current-password">') + '</div>' + galat,
+      tombol: kembali(SK.masukLagi ? 'tutup' : (SK.kode ? 'kode' : 'pemilik')) + (SK.masukLagi ? '' : '<button class="btn" data-act="skDaftar">Daftar</button>') + '<button class="btn pri" id="sk-go" data-act="skMasuk">Masuk</button>' };
+  } else if (l === 'pilih') {
+    o = { judul: 'Pilih perusahaan', isi: '<p class="note" style="margin-bottom:10px">Akun ini terdaftar di perusahaan berikut.</p><div class="sk-pilih">' +
+      SK.daftar.map(p => '<button class="btn" data-act="skPakai" data-id="' + esc(p.id) + '"><b>' + esc(p.nama) + '</b> <span class="note">· ' + esc(PERAN_LABEL[p.peran] || p.peran) + '</span></button>').join('') +
+      '<button class="btn ghost" data-act="skLangkah" data-l="baru">Buat perusahaan baru</button></div>' + galat, tombol: batal };
+  } else if (l === 'baru') {
+    const lokal = dataLokalAda();
+    o = { judul: 'Buat perusahaan di server', isi: SKLB('sk-nama', 'Nama perusahaan', '<input class="in" id="sk-nama" autocomplete="off" value="' + esc((Store.S.config && Store.S.config.perusahaan && Store.S.config.perusahaan.nama) || (SK.nama || '')) + '">') +
+      '<p class="note" style="margin-top:10px">' + (lokal ? 'Pembukuan di perangkat ini (' + fmtN.format(jmlTxLokal()) + ' transaksi dan jurnal) akan diunggah menjadi isi perusahaan ini.' : 'Perusahaan baru masih kosong. Setelah ini Anda mengisi profil dan saldo awalnya.') + ' Anda menjadi pemilik dan bisa mengundang anggota.</p>' + galat,
+      tombol: (SK.daftar.length ? kembali('pilih') : batal) + '<button class="btn pri" id="sk-go" data-act="skBuat">' + (lokal ? 'Buat dan unggah' : 'Buat perusahaan') + '</button>' };
+  } else if (l === 'ganti') {
+    o = { judul: 'Ganti data di perangkat ini?', isi: '<p>Pembukuan di perangkat ini (' + fmtN.format(jmlTxLokal()) + ' transaksi dan jurnal) akan <b>diganti</b> dengan data perusahaan <b>' + esc(SK.dipilih ? SK.dipilih.nama : '') + '</b> dari server. Unduh cadangan dulu bila data ini masih diperlukan.</p>' +
+      '<div style="margin-top:10px"><button class="btn" data-act="unduhCadangan">' + IC.unduh + ' Unduh cadangan</button></div>' + galat,
+      tombol: batal + '<button class="btn bahaya" id="sk-go" data-act="skYakinPakai">Ganti dengan data server</button>' };
+  } else {
+    o = { judul: 'Siapkan sinkronisasi', isi: '<p>Dengan sinkronisasi, pembukuan disimpan di server milik Anda sendiri (Supabase, gratis). Datanya sama di semua perangkat dan bisa dipakai bersama tim. Tiap orang masuk dengan emailnya sendiri, dan pemilik mengatur siapa yang boleh mengubah atau hanya melihat.</p>' +
+      '<div class="sk-pilih" style="margin-top:14px"><button class="btn pri" data-act="skLangkah" data-l="kode">Saya punya kode sambungan</button><div class="hint" style="margin:-4px 0 6px">Dari pemilik pembukuan, atau dari perangkat Anda yang lain.</div>' +
+      '<button class="btn" data-act="skLangkah" data-l="pemilik">Belum ada server, siapkan baru</button><div class="hint" style="margin-top:-4px">Perlu akun Supabase gratis. Sekitar 10 menit, cukup sekali.</div></div>', tombol: batal };
+  }
+  bukaModal({ judul: o.judul, isi: o.isi, tombol: o.tombol, lebar: o.lebar });
+}
+function bukaSink(langkah) {
+  Object.assign(SK, { url: '', key: '', kode: '', daftar: [], masukLagi: false, dipilih: null, email: '', mentah: '', nama: '' });
+  skTampil(langkah || 'awal');
+}
+
+async function skSambung(p, unggah) {
+  skPesan('Menyambungkan…', false);
+  const ok = await Store.cloud.hubungkan({ pid: p.id, nama: p.nama, peran: p.peran }, unggah);
+  UI.tahunSet = false; UI.page = 'pengaturan'; UI.set.tab = 'data';
+  tutupModal(); render();
+  toast(ok ? 'Tersambung. Data sekarang sinkron di semua perangkat.' : 'Tersambung. Sinkron pertama belum selesai: ' + Store.cloud.info().pesan, !ok);
+}
+async function skPakaiPerusahaan(p) {
+  if (dataLokalAda()) { SK.dipilih = p; skTampil('ganti'); return; }
+  await skSambung(p, false);
+}
+async function skSetelahMasuk() {
+  const daftar = (await Cloud.perusahaanSaya()) || [], c = Cloud.get();
+  if (SK.masukLagi) {
+    if (!daftar.find(x => x.id === c.pid)) throw new Error('Akun ini bukan anggota perusahaan yang tersambung di perangkat ini.');
+    Cloud.simpan(); tutupModal(); Store.cloud.sinkronkan(); toast('Berhasil masuk lagi.'); return;
+  }
+  if (SK.kode) {
+    const pid = await Cloud.gabung(SK.kode);
+    const p = ((await Cloud.perusahaanSaya()) || []).find(x => x.id === pid);
+    if (!p) throw new Error('Gagal bergabung ke perusahaan.');
+    await skPakaiPerusahaan(p); return;
+  }
+  SK.daftar = daftar;
+  skTampil(daftar.length ? 'pilih' : 'baru');
+}
+const skAkun = () => {
+  const email = $('#sk-email').value.trim(), sandi = $('#sk-sandi').value;
+  if (!email || !sandi) throw new Error('Isi email dan kata sandi.');
+  SK.email = email; return [email, sandi];
+};
+
+/* ----- anggota & undangan ----- */
+async function skAnggota() {
+  const c = Cloud.get(), pemilik = c.peran === 'pemilik';
+  const [ang, kode] = await Promise.all([Cloud.anggota(c.pid), pemilik ? Cloud.kodeUndangan(c.pid) : Promise.resolve('')]);
+  const kodeS = pemilik ? buatKodeSambung(c.url, c.key, kode) : '';
+  SK.undangan = kodeS;
+  const baris = (ang || []).map(a => {
+    const aku = a.user_id === c.uid;
+    const peran = pemilik && !aku && a.peran !== 'pemilik'
+      ? '<select class="in" style="width:auto" data-act-change="skPeran" data-u="' + esc(a.user_id) + '" aria-label="Peran ' + esc(a.email) + '"><option value="editor"' + (a.peran === 'editor' ? ' selected' : '') + '>Editor</option><option value="pelihat"' + (a.peran === 'pelihat' ? ' selected' : '') + '>Hanya lihat</option></select>'
+      : '<span class="chip' + (a.peran === 'pemilik' ? ' acc' : '') + '">' + esc(PERAN_LABEL[a.peran] || a.peran) + '</span>';
+    const aksi = pemilik && !aku ? '<button class="btn sm bahaya" data-act="skKeluarkan" data-u="' + esc(a.user_id) + '" data-e="' + esc(a.email) + '">Keluarkan</button>' : '';
+    return '<div class="sk-ang"><div class="sk-em">' + esc(a.email) + (aku ? ' <span class="note">(Anda)</span>' : '') + '</div>' + peran + aksi + '</div>';
+  }).join('');
+  bukaModal({
+    judul: 'Anggota & undangan', lebar: true, tanpaFokus: true,
+    isi: (pemilik ? '<p class="note" style="margin-bottom:8px">Kirim kode sambungan ini kepada orang yang boleh ikut mengisi pembukuan. Siapa pun yang memegangnya bisa mendaftar dan bergabung sebagai editor, jadi kirim lewat jalur pribadi dan ganti kodenya bila bocor.</p>' +
+      '<textarea class="in mono" id="sk-undang" readonly rows="3" style="font-size:11px">' + esc(kodeS) + '</textarea>' +
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 16px"><button class="btn" data-act="skSalinUndangan">Salin kode</button><button class="btn" data-act="skBagikan">Bagikan</button><button class="btn" data-act="skGantiKode">Ganti kode</button></div>' : '') +
+      '<h3 style="font-size:14px;margin:0 0 8px">Anggota (' + (ang || []).length + ')</h3><div class="sk-angs">' + baris + '</div><div class="hint neg" id="sk-err" role="alert" style="margin-top:8px"></div>',
+    tombol: (pemilik ? '<button class="btn bahaya" data-act="skHapusPerusahaan">Hapus perusahaan</button>' : '<button class="btn bahaya" data-act="skKeluarPerusahaan">Keluar dari perusahaan</button>') + '<span class="sp"></span><button class="btn pri" data-act="tutupModal">Selesai</button>',
+  });
+}
+const teksUndangan = () => {
+  const c = Cloud.get(), alamat = location.origin + location.pathname;
+  return 'Undangan pembukuan ' + (c.nama || '') + '\n1. Buka ' + alamat + '\n2. Pengaturan > Data & Cadangan > Siapkan sinkronisasi > "Saya punya kode sambungan"\n3. Tempel kode ini, lalu daftar dengan email Anda:\n' + SK.undangan;
+};
+
+const ACT_SYNC = {
+  bukaSink(el) { bukaSink(el && el.dataset.l); },
+  skLangkah(el) { if (el.dataset.l === 'tutup') tutupModal(); else skTampil(el.dataset.l); },
+  skSalinSql() { salinTeks(SQL_SKEMA).then(ok => toast(ok ? 'Kode SQL disalin. Tempel di SQL Editor Supabase.' : 'Tidak bisa menyalin otomatis. Buka "Lihat kode SQL" lalu salin manual.', !ok)); },
+  skKode() {
+    SK.mentah = $('#sk-kode').value;
+    return skJalankan(async () => {
+      const o = bacaKodeSambung(SK.mentah);
+      if (!o) throw new Error('Kode tidak valid. Salin ulang seluruh kode yang dikirim pemilik, mulai dari PB1.');
+      Object.assign(SK, { url: o.url, key: o.key, kode: o.kode, hostTampil: new URL(o.url).host });
+      Cloud.siap(o.url, o.key); await Cloud.cekServer();
+      skTampil('akun');
+    });
+  },
+  skPemilik() {
+    SK.url = $('#sk-url').value; SK.key = $('#sk-key').value;
+    return skJalankan(async () => {
+      const url = normUrl(SK.url), key = SK.key.trim();
+      if (!url) throw new Error('Alamat proyek belum benar. Contoh: https://abcdxyz.supabase.co');
+      if (key.length < 20) throw new Error('Isi Publishable key dari Project Settings > API Keys.');
+      if (/^sb_secret_/i.test(key)) throw new Error('Itu Secret key yang bersifat rahasia. Pakai Publishable key (sb_publishable_…) atau kunci anon.');
+      if (/service_role/i.test(key) || (key.split('.').length === 3 && /"role"\s*:\s*"service_role"/.test((() => { try { return atob(key.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')); } catch (e) { return ''; } })()))) throw new Error('Itu kunci service_role yang bersifat rahasia. Pakai Publishable key atau kunci anon.');
+      Object.assign(SK, { url, key, kode: '', hostTampil: new URL(url).host });
+      Cloud.siap(url, key);
+      const s = await Cloud.cekServer();
+      if (s.daftarMati) throw new Error('Pendaftaran akun dimatikan di proyek ini. Nyalakan "Allow new users to sign up" di Authentication.');
+      skTampil('akun');
+      if (s.autoKonfirmasi === false) skPesan('Perhatian: "Confirm email" masih menyala. Anggota baru harus mengonfirmasi email dulu. Matikan di Authentication bila ingin langsung masuk.', true);
+    });
+  },
+  skMasuk() { return skJalankan(async () => { const [e, s] = skAkun(); await Cloud.masuk(e, s); await skSetelahMasuk(); }); },
+  skDaftar() {
+    return skJalankan(async () => {
+      const [e, s] = skAkun(); const r = await Cloud.daftar(e, s);
+      if (!r.masuk) { skPesan('Pendaftaran berhasil. Buka email dari Supabase dan tekan tautan konfirmasinya, lalu kembali ke sini dan tekan Masuk.', false); return; }
+      await skSetelahMasuk();
+    });
+  },
+  skPakai(el) { const p = SK.daftar.find(x => x.id === el.dataset.id); if (p) return skJalankan(() => skPakaiPerusahaan(p)); },
+  skYakinPakai() { return skJalankan(() => skSambung(SK.dipilih, false)); },
+  skBuat() {
+    SK.nama = $('#sk-nama').value.trim();
+    return skJalankan(async () => {
+      if (!SK.nama) throw new Error('Isi nama perusahaan.');
+      const pid = await Cloud.buatPerusahaan(SK.nama);
+      await skSambung({ id: pid, nama: SK.nama, peran: 'pemilik' }, dataLokalAda());
+    });
+  },
+  sinkronSekarang() { Store.cloud.sinkronkan().then(ok => toast(ok ? 'Data sudah sinkron.' : 'Belum berhasil sinkron: ' + (Store.cloud.info().pesan || 'periksa koneksi.'), !ok)); },
+  masukLagi() { Object.assign(SK, { masukLagi: true, kode: '', email: (Cloud.get() || {}).email || '' }); skTampil('akun'); },
+  putuskanSink() {
+    konfirmasi('Putuskan di perangkat ini?', 'Perangkat ini berhenti sinkron. Salinan data di sini tetap ada sebagai data lokal, dan data di server serta perangkat lain tidak berubah. Anda bisa menyambungkan lagi kapan saja.', 'Putuskan', () => { Store.cloud.putuskan(); toast('Sinkronisasi diputus. Data tetap ada di perangkat ini.'); }, true);
+  },
+  bukaAnggota() { skAnggota().catch(e => toast(e.message || 'Gagal memuat anggota.', true)); },
+  skSalinUndangan() { salinTeks(SK.undangan).then(ok => toast(ok ? 'Kode sambungan disalin.' : 'Tidak bisa menyalin otomatis. Tekan lama pada kotak lalu pilih Salin.', !ok)); },
+  skBagikan() {
+    const t = teksUndangan();
+    if (navigator.share) { navigator.share({ text: t }).catch(() => {}); return; }
+    window.open('https://wa.me/?text=' + encodeURIComponent(t), '_blank', 'noopener');
+  },
+  skGantiKode(el) { two(el, () => { Cloud.gantiKode(Cloud.get().pid).then(() => { toast('Kode diganti. Kode lama tidak berlaku lagi.'); return skAnggota(); }).catch(e => skPesan(e.message)); }, 'Yakin? Tekan lagi'); },
+  skKeluarkan(el) {
+    two(el, () => { Cloud.keluarkan(Cloud.get().pid, el.dataset.u).then(() => { toast('Anggota dikeluarkan.'); return skAnggota(); }).catch(e => skPesan(e.message)); }, 'Yakin? Tekan lagi');
+  },
+  skKeluarPerusahaan(el) {
+    two(el, () => { const c = Cloud.get(); Cloud.keluarkan(c.pid, c.uid).then(() => { tutupModal(); Store.cloud.putuskan(); toast('Anda keluar dari perusahaan. Salinan data tetap ada di perangkat ini.'); }).catch(e => skPesan(e.message)); }, 'Yakin? Tekan lagi');
+  },
+  skHapusPerusahaan(el) {
+    two(el, () => { Cloud.hapusPerusahaan(Cloud.get().pid).then(() => { tutupModal(); Store.cloud.putuskan(); toast('Perusahaan dihapus dari server. Salinan data tetap ada di perangkat ini.'); }).catch(e => skPesan(e.message)); }, 'Hapus untuk SEMUA anggota? Tekan lagi');
+  },
+  skUlang() { Store.cloud.muatUlang(); },
+};
+const ACTC_SYNC = {
+  skPeran(el) { Cloud.ubahPeran(Cloud.get().pid, el.dataset.u, el.value).then(() => toast('Peran diubah.')).catch(e => { toast(e.message, true); skAnggota(); }); },
+};
+
 /* ===== ui2.js ===== */
 /* ================= Jurnal & Buku Besar ================= */
 const sumberChip = s => (s === 'kas' ? '<span class="chip acc">Kas &amp; Bank</span>' : s === 'manual' ? '<span class="chip warn">Manual</span>' : '<span class="chip">Saldo awal</span>');
@@ -2489,12 +3139,257 @@ function vAturan() {
 
 function vData() {
   const S = Store.S, nTx = M.txAll.length, nJr = Object.keys(M.jrById).length, nBln = Object.keys(S.months).filter(k => S.months[k].tx.length || S.months[k].jr.length).length;
-  const sim = Store.mode === 'db' ? 'Disimpan di penyimpanan halaman ini dan tetap ada saat Anda membukanya lagi.' : Store.mode === 'local' ? 'Disimpan di browser ini saja. Data tidak ikut ke perangkat lain, jadi unduh cadangan secara berkala.' : 'Belum tersimpan permanen di tampilan ini. Unduh cadangan sebelum menutup halaman.';
-  return '<div class="cols ce" style="max-width:980px"><div class="panel"><div class="panel-h"><h2>Penyimpanan</h2></div><dl class="kv"><dt>Transaksi kas &amp; bank</dt><dd>' + fmtN.format(nTx) + '</dd><dt>Jurnal manual</dt><dd>' + fmtN.format(nJr) + '</dd><dt>Bulan berisi data</dt><dd>' + nBln + '</dd><dt>Akun</dt><dd>' + M.akun.length + '</dd><dt>Status</dt><dd>' + sim + '</dd></dl></div>' +
+  const sim = Store.mode === 'db' ? 'Disimpan di penyimpanan halaman ini dan tetap ada saat Anda membukanya lagi.' : Store.mode === 'cloud' ? 'Disimpan di server Supabase Anda dan di salinan perangkat ini, jadi tetap bisa dibuka tanpa internet dan otomatis sinkron saat online.' : Store.mode === 'local' ? 'Disimpan di browser ini saja. Data tidak ikut ke perangkat lain, jadi unduh cadangan secara berkala.' : 'Belum tersimpan permanen di tampilan ini. Unduh cadangan sebelum menutup halaman.';
+  return '<div class="cols ce" style="max-width:980px">' + vSinkron() + '<div class="panel"><div class="panel-h"><h2>Penyimpanan</h2></div><dl class="kv"><dt>Transaksi kas &amp; bank</dt><dd>' + fmtN.format(nTx) + '</dd><dt>Jurnal manual</dt><dd>' + fmtN.format(nJr) + '</dd><dt>Bulan berisi data</dt><dd>' + nBln + '</dd><dt>Akun</dt><dd>' + M.akun.length + '</dd><dt>Status</dt><dd>' + sim + '</dd></dl></div>' +
     '<div class="panel"><div class="panel-h"><h2>Cadangan</h2></div><p class="note" style="margin-bottom:12px">Cadangan berisi semua profil, akun, saldo awal, dan transaksi dalam satu berkas JSON.</p><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" data-act="unduhCadangan">' + IC.unduh + ' Unduh cadangan</button><label class="btn" for="pulih-file" style="cursor:pointer">Pulihkan dari berkas…</label><input id="pulih-file" type="file" accept=".json,application/json" class="sr"></div></div>' +
     '<div class="panel"><div class="panel-h"><h2>Impor transaksi</h2></div><p class="note" style="margin-bottom:12px">Unggah mutasi rekening dari internet banking atau e-statement (PDF, Excel, atau CSV). Kategori akun diisi otomatis dari aturan.</p><button class="btn" data-act="bukaImpor">Impor mutasi bank</button></div>' +
     '<div class="panel"><div class="panel-h"><h2>Mulai ulang</h2></div><p class="note" style="margin-bottom:12px">' + (M.cfg.demo ? 'Saat ini memakai data contoh.' : 'Tindakan ini menghapus seluruh data pembukuan.') + '</p><div style="display:flex;gap:8px;flex-wrap:wrap">' +
     (M.cfg.demo ? '<button class="btn pri" data-act="mulaiSendiri">Hapus data contoh, mulai dengan data saya</button>' : '<button class="btn" data-act="muatContohKonfirm">Ganti dengan data contoh</button><button class="btn bahaya" data-act="hapusSemua">Hapus semua data</button>') + '</div></div></div>';
+}
+
+/* ===== spt.js ===== */
+/* ================= SPT Tahunan PPh Badan: bahan dan perkiraan perhitungan =================
+   Alat bantu: menyusun angka dari pembukuan, rekonsiliasi fiskal, dan perkiraan PPh terutang.
+   Angka akhir tetap diisi dan dilaporkan sendiri di Coretax.                                  */
+const SPT_B31E = 4800000000, SPT_B50 = 50000000000, SPT_TARIF = 0.22, SPT_FINAL = 0.005;
+const SPT_PRESET = {
+  pos: ['Sumbangan, jamuan, atau representasi tanpa daftar nominatif', 'Biaya pribadi pemilik atau pengurus', 'Denda dan bunga pajak', 'Imbalan natura atau kenikmatan yang tidak boleh dibiayakan', 'Selisih penyusutan komersial dan fiskal'],
+  neg: ['Penghasilan yang sudah dikenai PPh final (mis. bunga bank)', 'Penghasilan bukan objek pajak', 'Selisih penyusutan fiskal dan komersial'],
+};
+const sptKosong = () => ({ pos: [], neg: [], rugi: [], tarif: 'normal', bruto: null, kredit: { p22: 0, p23: 0, p24: 0, p25: 0 }, finalSetor: 0 });
+function sptGabung(inp) {
+  const o = Object.assign(sptKosong(), inp || {});
+  o.kredit = Object.assign({ p22: 0, p23: 0, p24: 0, p25: 0 }, (inp && inp.kredit) || {});
+  ['pos', 'neg', 'rugi'].forEach(k => { if (!Array.isArray(o[k])) o[k] = []; });
+  return o;
+}
+
+/* Perhitungan murni: lr = hasil M.lr() untuk setahun penuh, inp = isian pengguna, th = tahun pajak. */
+function hitungSpt(lr, inp, th) {
+  inp = sptGabung(inp);
+  const jml = a => a.reduce((s, r) => s + (+r.jml || 0), 0);
+  const peredaranUsaha = lr.pend;
+  const brutoAuto = lr.pend + lr.pl;
+  const bruto = inp.bruto != null && inp.bruto !== '' && isFinite(+inp.bruto) ? +inp.bruto : brutoAuto;
+  const labaKomersial = lr.sbp;
+  const pos = jml(inp.pos), neg = jml(inp.neg);
+  const neto = labaKomersial + pos - neg;
+  // kompensasi kerugian: kerugian tahun T boleh dikompensasi pada tahun T+1 sampai T+5, dimulai dari yang tertua
+  let sisaLaba = Math.max(0, neto);
+  const rugi = inp.rugi.map(r => ({ tahun: +r.tahun || 0, jml: Math.max(0, +r.jml || 0) })).sort((a, b) => a.tahun - b.tahun).map(r => {
+    const berlaku = r.tahun > 0 && th > r.tahun && th <= r.tahun + 5;
+    const dipakai = berlaku ? Math.min(r.jml, sisaLaba) : 0;
+    sisaLaba -= dipakai;
+    return { tahun: r.tahun, jml: r.jml, berlaku, kedaluwarsa: r.tahun > 0 && th > r.tahun + 5, dipakai, sisa: r.jml - dipakai };
+  });
+  const kompensasi = rugi.reduce((s, r) => s + r.dipakai, 0);
+  const pkp = Math.floor(Math.max(0, neto - kompensasi) / 1000) * 1000;
+  const rugiTahunIni = neto < 0 ? -neto : 0;
+  const k = inp.kredit, kredit = (+k.p22 || 0) + (+k.p23 || 0) + (+k.p24 || 0) + (+k.p25 || 0);
+  const hasil = { inp, peredaranUsaha, brutoAuto, bruto, labaKomersial, pos, neg, neto, rugi, kompensasi, pkp, rugiTahunIni, kredit, tarif: inp.tarif, peringatan: [] };
+  if (inp.tarif === 'final') {
+    hasil.pph = Math.round(peredaranUsaha * SPT_FINAL);
+    hasil.final = { dasar: peredaranUsaha, tarif: SPT_FINAL, disetor: +inp.finalSetor || 0 };
+    hasil.selisih = hasil.pph - hasil.final.disetor;
+    if (peredaranUsaha > SPT_B31E) hasil.peringatan.push('Peredaran usaha melebihi Rp4,8 miliar. PPh final 0,5% tidak berlaku; pakai tarif normal.');
+    return hasil;
+  }
+  let berfasilitas = 0;
+  if (bruto <= SPT_B31E) berfasilitas = pkp;
+  else if (bruto <= SPT_B50) berfasilitas = Math.floor(pkp * SPT_B31E / bruto);
+  const biasa = pkp - berfasilitas;
+  const pphFasilitas = berfasilitas * SPT_TARIF * 0.5, pphBiasa = biasa * SPT_TARIF;
+  hasil.pph = Math.round(pphFasilitas + pphBiasa);
+  hasil.rincian = { berfasilitas, biasa, pphFasilitas: Math.round(pphFasilitas), pphBiasa: Math.round(pphBiasa), pasal31E: bruto <= SPT_B50 };
+  hasil.selisih = hasil.pph - kredit; // positif: kurang bayar (Pasal 29); negatif: lebih bayar
+  return hasil;
+}
+
+const sptRow = (label, nilai, o) => {
+  o = o || {};
+  return '<tr class="' + (o.cls || '') + '"><td>' + label + (o.cat ? '<div class="k2">' + o.cat + '</div>' : '') + '</td><td class="n' + (nilai < -0.5 && !o.polos ? ' neg' : '') + '">' + (o.teks != null ? o.teks : angkaStrip(nilai)) + '</td></tr>';
+};
+const sptKolom = th => ({ a: th + '-01', b: th + '-12', ym: th + '-12', label: 'Tahun ' + th });
+function sptBaris(k, daftar, th) {
+  return daftar.map((r, i) => '<div class="spt-row">' + (k === 'rugi'
+    ? '<input class="in" style="width:96px;flex:none" inputmode="numeric" maxlength="4" id="spt-' + k + '-t-' + i + '" data-spt-k="' + k + '" data-spt-f="tahun" data-i="' + i + '" data-act-change="sptSimpan" value="' + esc(r.tahun || '') + '" placeholder="Tahun" aria-label="Tahun terjadinya kerugian">'
+    : '<input class="in grow" id="spt-' + k + '-k-' + i + '" data-spt-k="' + k + '" data-spt-f="ket" data-i="' + i + '" data-act-change="sptSimpan" value="' + esc(r.ket) + '" placeholder="Uraian koreksi" aria-label="Uraian">') +
+    '<input class="in uang num-in" style="width:160px;flex:none" inputmode="numeric" id="spt-' + k + '-j-' + i + '" data-spt-k="' + k + '" data-spt-f="jml" data-i="' + i + '" data-act-change="sptSimpan" value="' + (r.jml ? fmtN.format(r.jml) : '') + '" placeholder="0" aria-label="Jumlah (Rp)">' +
+    '<button class="btn sm ghost" data-act="sptHapus" data-k="' + k + '" data-i="' + i + '" aria-label="Hapus baris">' + IC.tutup + '</button></div>').join('');
+}
+function sptDaftar(judul, k, daftar, th, bantu) {
+  const presets = k === 'rugi' ? '' : '<select class="in" id="spt-pre-' + k + '" style="max-width:100%" aria-label="Pilih jenis koreksi"><option value="-1">Pilih contoh koreksi…</option>' + SPT_PRESET[k].map((t, i) => '<option value="' + i + '">' + esc(t) + '</option>').join('') + '<option value="x">Lainnya (isi sendiri)</option></select>';
+  return '<div class="spt-blok"><h3>' + judul + '</h3>' + (bantu ? '<p class="note" style="margin:0 0 8px">' + bantu + '</p>' : '') +
+    (daftar.length ? sptBaris(k, daftar, th) : '<p class="note" style="margin:0 0 8px">Belum ada.</p>') +
+    '<div class="spt-row" style="margin-top:8px">' + presets + '<button class="btn sm" data-act="sptTambah" data-k="' + k + '">' + IC.plus + ' Tambah</button></div></div>';
+}
+
+const sptTarifTeks = h => (h.tarif === 'final' ? 'PPh final UMKM 0,5% dari peredaran usaha' : 'Tarif normal 22%' + (h.bruto <= SPT_B50 ? ' dengan fasilitas Pasal 31E' : ''));
+const sptTabel = baris => '<div class="tw"><table class="t st"><tbody>' + baris + '</tbody></table></div>';
+function sptCalcHtml(h) {
+  const inp = h.inp, th = UI.tahun;
+  let baris = sptRow('Laba sebelum pajak (komersial)', h.labaKomersial) +
+    sptRow('Koreksi fiskal positif', h.pos, { cat: inp.pos.length + ' item' }) +
+    sptRow('Koreksi fiskal negatif', -h.neg, { cat: inp.neg.length + ' item' }) +
+    sptRow('Penghasilan neto fiskal', h.neto, { cls: 'tot' });
+  h.rugi.forEach(r => { baris += sptRow('Kompensasi kerugian tahun ' + (r.tahun || '?'), -r.dipakai, { cat: r.kedaluwarsa ? 'Sudah lewat 5 tahun, tidak bisa dikompensasi' : !r.berlaku ? 'Isi tahun rugi dengan benar' : 'Sisa setelah dipakai ' + rp(r.sisa) }); });
+  baris += sptRow('Penghasilan kena pajak (PKP)', h.pkp, { cls: 'grand', cat: 'Dibulatkan ke bawah hingga ribuan rupiah penuh' });
+  if (h.rugiTahunIni > 0.5) baris += sptRow('Kerugian fiskal tahun ini', h.rugiTahunIni, { cat: 'Dapat dikompensasi sampai tahun ' + (th + 5) + ' (catat di tahun berikutnya)' });
+  return sptTabel(baris);
+}
+function sptOut1Html(h) {
+  if (h.tarif === 'final') return sptTabel(sptRow('Peredaran usaha', h.final.dasar) + sptRow('PPh final terutang (0,5%)', h.pph, { cls: 'tot' }));
+  const r = h.rincian;
+  let b = '';
+  if (r.berfasilitas > 0) b += sptRow('PPh atas PKP berfasilitas Pasal 31E', r.pphFasilitas, { cat: rp(r.berfasilitas) + ' × 11% (50% × 22%)' });
+  if (r.biasa > 0) b += sptRow('PPh atas PKP tanpa fasilitas', r.pphBiasa, { cat: rp(r.biasa) + ' × 22%' });
+  if (!r.berfasilitas && !r.biasa) b += sptRow('PPh atas PKP', 0, { cat: 'PKP nol' });
+  return sptTabel(b + sptRow('PPh terutang', h.pph, { cls: 'tot' }));
+}
+function sptOut2Html(h) {
+  if (h.tarif === 'final') return sptTabel(sptRow(h.selisih > 0.5 ? 'PPh final kurang disetor' : h.selisih < -0.5 ? 'PPh final lebih disetor' : 'PPh final sudah sesuai', Math.abs(h.selisih), { cls: 'final', polos: true }));
+  return sptTabel(sptRow('Total kredit pajak', h.kredit) +
+    sptRow(h.selisih > 0.5 ? 'PPh kurang bayar (Pasal 29)' : h.selisih < -0.5 ? 'PPh lebih bayar' : 'PPh nihil', Math.abs(h.selisih), { cls: 'final', polos: true, cat: h.selisih > 0.5 ? 'Disetor sebelum SPT dilaporkan' : h.selisih < -0.5 ? 'Dapat dikompensasikan atau diminta kembali (restitusi)' : '' }));
+}
+const sptWarnHtml = h => h.peringatan.map(t => '<div class="hint neg" style="margin-top:8px" role="alert">' + esc(t) + '</div>').join('');
+// hitung ulang dari isian dan ganti hanya bagian hasilnya (kolom isian tidak dibangun ulang)
+function sptSegarkan(o) {
+  const th = UI.tahun, c = sptKolom(th), h = hitungSpt(M.lr(c.a, c.b), o, th);
+  const set = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+  set('spt-calc', sptCalcHtml(h)); set('spt-out1', sptOut1Html(h)); set('spt-out2', sptOut2Html(h)); set('spt-warn', sptWarnHtml(h));
+  const tt = $('#spt-tarifteks'); if (tt) tt.textContent = sptTarifTeks(h);
+}
+
+function vSpt() {
+  const th = UI.tahun, p = M.cfg.perusahaan, col = sptKolom(th);
+  const lr = M.lr(col.a, col.b), inp = sptGabung(((M.cfg.laporan || {})[th] || {}).spt);
+  const h = hitungSpt(lr, inp, th), adaData = M.adaDataTahun(th);
+  const bunga = M.akun.filter(a => a.tipe === 'pendapatan_lain' && /bunga|jasa giro/i.test(a.nama)).reduce((s, a) => s + M.mutT(a.kode, col.a, col.b), 0);
+  const sudahBunga = inp.neg.some(r => /bunga/i.test(r.ket));
+  let o = kepala('SPT Tahunan', 'Bahan dan perkiraan perhitungan SPT Tahunan PPh Badan tahun pajak ' + th + '.',
+    '<button class="btn" data-act="unduhSpt">' + IC.unduh + ' Excel bahan SPT</button>');
+  o += '<div class="banner info"><div><b>Alat bantu, bukan pengganti Coretax.</b> Angka di sini dihitung dari pembukuan Anda dan isian koreksi di bawah. Tidak ada yang dikirim ke DJP, dan hasilnya perlu diperiksa konsultan pajak atau KPP sebelum diisi di Coretax.</div></div>';
+  if (!adaData) o += '<div class="banner"><div><b>Belum ada transaksi di tahun ' + th + '.</b> Pilih tahun lain di pojok kanan atas atau catat transaksi dulu.</div></div>';
+  if (th === new Date().getFullYear()) o += '<div class="banner"><div><b>Tahun ' + th + ' belum berakhir.</b> Angka masih sementara sampai pembukuan setahun penuh selesai.</div></div>';
+
+  // 1. dari pembukuan
+  o += '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>1. Laba rugi komersial dari pembukuan</h2><span class="sub">Tahun ' + th + '</span></div>' +
+    renderStatement(lrLines(M, [col]).lines, [col], { delta: false }) +
+    '<p class="note" style="margin-top:8px">Beban PPh yang tercatat di pembukuan berada di bawah laba sebelum pajak, jadi tidak ikut dihitung sebagai biaya.</p></div>';
+
+  // 2. rekonsiliasi fiskal
+  o += '<form class="panel" id="spt-form" style="margin-bottom:14px" onsubmit="return false"><div class="panel-h"><h2>2. Rekonsiliasi fiskal</h2><span class="sub">Koreksi laba komersial menjadi laba fiskal</span></div>' +
+    '<p class="note" style="margin-bottom:12px">Sebagian biaya dan penghasilan diperlakukan berbeda oleh aturan pajak. Isi koreksinya di sini. Contoh yang tercantum hanya pengingat, bukan daftar lengkap, dan tiap jenis koreksi punya syarat masing-masing.</p>' +
+    (bunga > 0.5 && !sudahBunga ? '<div class="banner" style="margin-bottom:12px"><div>Ada pendapatan bunga/jasa giro <b>' + rp(bunga) + '</b> di pembukuan. Bunga bank umumnya sudah dipotong PPh final sehingga dikoreksi negatif. <button class="btn sm" data-act="sptBunga">Masukkan sebagai koreksi negatif</button></div></div>' : '') +
+    '<div class="spt-dua">' +
+    sptDaftar('Koreksi positif (menambah laba)', 'pos', inp.pos, th, 'Biaya yang tidak boleh dikurangkan menurut pajak.') +
+    sptDaftar('Koreksi negatif (mengurangi laba)', 'neg', inp.neg, th, 'Penghasilan yang final atau bukan objek pajak, dan pengurang lainnya.') + '</div>' +
+    sptDaftar('Kerugian fiskal tahun-tahun sebelumnya', 'rugi', inp.rugi, th, 'Isi tahun rugi dan sisa kerugian yang belum dikompensasi. Kerugian tahun T boleh dikompensasi sampai 5 tahun berikutnya (T+1 sampai T+5), dimulai dari yang tertua.') +
+    '</form>';
+
+  // 3. perhitungan (bagian hasil diperbarui di tempat saat isian berubah, supaya kolom yang sedang diisi tidak hilang)
+  const fldU = (id, lb, v, extra) => '<div class="fld"><label class="lbl" for="' + id + '">' + lb + '</label><input class="in uang num-in" inputmode="numeric" id="' + id + '" data-act-change="sptSimpan" value="' + (v ? fmtN.format(v) : '') + '" placeholder="0"' + (extra || '') + '></div>';
+  let tarifBlok = '<div class="grid2" style="margin:14px 0"><div class="fld span2"><label class="lbl" for="spt-tarif">Tarif yang dipakai</label><select class="in" id="spt-tarif" data-act-change="sptSimpan">' +
+    opt('normal', 'Tarif normal 22% (otomatis dengan fasilitas Pasal 31E bila peredaran bruto sampai Rp50 miliar)', inp.tarif) +
+    opt('final', 'PPh final UMKM 0,5% dari peredaran usaha (hanya bila masih berhak)', inp.tarif) + '</select></div>';
+  let kreditBlok;
+  if (h.tarif === 'final') {
+    tarifBlok += '</div><p class="note" style="margin-bottom:10px">Tarif final 0,5% punya batas waktu untuk PT (3 tahun pajak) dan CV, firma, atau koperasi (4 tahun pajak) sejak terdaftar, dan DJP menyatakan tidak ada perpanjangan untuk badan usaha. Ketentuan untuk orang pribadi dan PT perorangan berubah lewat PP 20/2026. Pakai opsi ini hanya jika Anda yakin masih berhak, dan periksa ke KPP atau konsultan pajak.</p>';
+    kreditBlok = '<div class="grid2" style="margin-top:12px">' + fldU('spt-fsetor', 'PPh final yang sudah disetor sepanjang tahun', inp.finalSetor) + '</div>';
+  } else {
+    tarifBlok += fldU('spt-bruto', 'Peredaran bruto (acuan batas Rp4,8 miliar dan Rp50 miliar)', inp.bruto, ' placeholder="' + fmtN.format(h.brutoAuto) + '"') + '<div class="fld"><span class="lbl">Otomatis dari pembukuan</span><div class="hint" style="padding-top:10px">' + rp(h.brutoAuto) + ' (pendapatan usaha + pendapatan lain). Isi kolom di samping bila peredaran bruto menurut aturan berbeda; kosongkan untuk memakai angka otomatis.</div></div></div>';
+    kreditBlok = '<h3 style="margin:16px 0 8px;font-size:14px">Kredit pajak (sudah dibayar atau dipotong pihak lain)</h3><div class="grid2">' +
+      fldU('spt-k22', 'PPh Pasal 22', inp.kredit.p22) + fldU('spt-k23', 'PPh Pasal 23 dan 26', inp.kredit.p23) + fldU('spt-k24', 'PPh Pasal 24 (luar negeri)', inp.kredit.p24) + fldU('spt-k25', 'PPh Pasal 25 (angsuran bulanan)', inp.kredit.p25) + '</div>';
+  }
+  o += '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>3. Perhitungan PPh terutang</h2><span class="sub" id="spt-tarifteks">' + esc(sptTarifTeks(h)) + '</span></div>' +
+    '<div id="spt-calc">' + sptCalcHtml(h) + '</div>' + tarifBlok + '<div id="spt-out1">' + sptOut1Html(h) + '</div>' + kreditBlok + '<div id="spt-out2">' + sptOut2Html(h) + '</div><div id="spt-warn">' + sptWarnHtml(h) + '</div>' +
+    '<p class="note" style="margin-top:12px">Perkiraan ini dibulatkan ke rupiah dan bisa berbeda beberapa rupiah dengan hasil Coretax. Fasilitas lain (misalnya perseroan terbuka, wilayah khusus, atau insentif tertentu) tidak dihitung di sini.</p></div>';
+
+  // 4. neraca dan lampiran
+  o += '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>4. Posisi keuangan (neraca)</h2><span class="sub">31 Desember ' + th + '</span></div>' +
+    renderStatement(nrcLines(M, [col]).lines, [col], { delta: false }) + '</div>';
+  const cek = (ok, t, cat) => '<li>' + (ok ? IC.cek : '<span class="sk-box"></span>') + '<span>' + t + (cat ? '<div class="note">' + cat + '</div>' : '') + '</span></li>';
+  o += '<div class="panel"><div class="panel-h"><h2>5. Daftar bahan yang perlu disiapkan</h2></div><ul class="spt-cek">' +
+    cek(true, 'Laporan laba rugi dan neraca', 'Sudah ada di aplikasi (halaman ini dan Laporan Tahunan).') +
+    cek(false, 'Bukti potong PPh Pasal 22, 23, atau 24', 'Kumpulkan dari pihak pemotong; jumlahnya diisi di Kredit pajak.') +
+    cek(false, 'Bukti setor angsuran PPh Pasal 25 dan PPh Pasal 29', 'Dari bukti pembayaran pajak.') +
+    cek(false, 'Daftar aset tetap dan penyusutan fiskal', 'Perlu disusun terpisah bila ada penyusutan atau amortisasi fiskal.') +
+    cek(false, 'Daftar nominatif biaya dan data pemegang saham serta pengurus', 'Diisi di lampiran Coretax sesuai jawaban formulir induk.') + '</ul>' +
+    '<p class="note" style="margin-top:12px">Lampiran yang wajib diisi ditentukan sistem Coretax dari jawaban di formulir induk. Batas lapor SPT Badan umumnya akhir bulan keempat setelah tahun buku berakhir (30 April untuk tahun buku Januari sampai Desember), dan PPh kurang bayar disetor sebelum SPT dilaporkan. Periksa pengumuman DJP bila ada perubahan.</p></div>';
+  return o;
+}
+
+function sptBaca() {
+  const o = sptKosong(), q = (k, f) => Array.from(document.querySelectorAll('[data-spt-k="' + k + '"][data-spt-f="' + f + '"]'));
+  ['pos', 'neg'].forEach(k => q(k, 'ket').forEach(el => {
+    const j = document.querySelector('[data-spt-k="' + k + '"][data-spt-f="jml"][data-i="' + el.dataset.i + '"]');
+    o[k].push({ ket: el.value.trim(), jml: j ? Math.abs(bacaUang(j)) : 0 });
+  }));
+  q('rugi', 'tahun').forEach(el => {
+    const j = document.querySelector('[data-spt-k="rugi"][data-spt-f="jml"][data-i="' + el.dataset.i + '"]');
+    o.rugi.push({ tahun: parseInt(el.value, 10) || 0, jml: j ? Math.abs(bacaUang(j)) : 0 });
+  });
+  const tr = $('#spt-tarif'); o.tarif = tr && tr.value === 'final' ? 'final' : 'normal';
+  const br = $('#spt-bruto'); o.bruto = br && br.value.trim() !== '' ? Math.abs(bacaUang(br)) : null;
+  [['p22', 'spt-k22'], ['p23', 'spt-k23'], ['p24', 'spt-k24'], ['p25', 'spt-k25']].forEach(([k, id]) => { const e = document.getElementById(id); o.kredit[k] = e ? Math.abs(bacaUang(e)) : 0; });
+  const fs = $('#spt-fsetor'); o.finalSetor = fs ? Math.abs(bacaUang(fs)) : 0;
+  return o;
+}
+function sptSimpanNilai(o, diam) {
+  const th = UI.tahun;
+  return Store.ubahConfig(c => { c.laporan = c.laporan || {}; c.laporan[th] = c.laporan[th] || {}; c.laporan[th].spt = o; }, diam);
+}
+const ACT_SPT = {
+  sptTambah(el) {
+    const k = el.dataset.k, o = sptBaca(), th = UI.tahun;
+    if (k === 'rugi') o.rugi.push({ tahun: th - 1, jml: 0 });
+    else {
+      const s = $('#spt-pre-' + k), v = s ? s.value : 'x';
+      if (v === '-1') { toast('Pilih contoh koreksi atau "Lainnya" dulu.', true); return; }
+      o[k].push({ ket: v === 'x' ? '' : SPT_PRESET[k][+v], jml: 0 });
+    }
+    if (sptSimpanNilai(o)) render();
+  },
+  sptHapus(el) { const o = sptBaca(); o[el.dataset.k].splice(+el.dataset.i, 1); if (sptSimpanNilai(o)) render(); },
+  sptBunga() {
+    const th = UI.tahun, col = sptKolom(th), o = sptBaca();
+    const bunga = M.akun.filter(a => a.tipe === 'pendapatan_lain' && /bunga|jasa giro/i.test(a.nama)).reduce((s, a) => s + M.mutT(a.kode, col.a, col.b), 0);
+    o.neg.push({ ket: 'Pendapatan bunga dan jasa giro (PPh final)', jml: Math.round(bunga) });
+    if (sptSimpanNilai(o)) render();
+  },
+  unduhSpt() { unduhSpt(); },
+};
+const ACTC_SPT = {
+  sptSimpan() {
+    const o = sptBaca(), lama = sptGabung((((M.cfg.laporan || {})[UI.tahun]) || {}).spt);
+    if (o.tarif !== lama.tarif) { if (sptSimpanNilai(o)) render(); return; }   // ganti tarif mengubah susunan halaman
+    if (sptSimpanNilai(o, true)) sptSegarkan(o);                               // isian biasa: hanya hasil yang diperbarui
+  },
+};
+
+function unduhSpt() {
+  if (!pastikanXlsx()) return;
+  const th = UI.tahun, col = sptKolom(th), lr = M.lr(col.a, col.b), inp = sptGabung(((M.cfg.laporan || {})[th] || {}).spt), h = hitungSpt(lr, inp, th);
+  const wb = XLSX.utils.book_new(), add = (ws, nama) => XLSX.utils.book_append_sheet(wb, ws, nama);
+  const rows = [['Laba sebelum pajak (komersial)', h.labaKomersial], ['Koreksi fiskal positif', h.pos]];
+  inp.pos.forEach(r => rows.push(['   ' + (r.ket || '(tanpa uraian)'), r.jml]));
+  rows.push(['Koreksi fiskal negatif', -h.neg]);
+  inp.neg.forEach(r => rows.push(['   ' + (r.ket || '(tanpa uraian)'), -r.jml]));
+  rows.push(['Penghasilan neto fiskal', h.neto]);
+  h.rugi.forEach(r => rows.push(['Kompensasi kerugian tahun ' + (r.tahun || '?'), -r.dipakai]));
+  rows.push(['Penghasilan kena pajak (PKP)', h.pkp]);
+  if (h.tarif === 'final') {
+    rows.push(['Tarif', 'PPh final UMKM 0,5%'], ['Peredaran usaha', h.final.dasar], ['PPh final terutang', h.pph], ['PPh final yang sudah disetor', h.final.disetor], ['Kurang (lebih) disetor', h.selisih]);
+  } else {
+    rows.push(['Tarif', 'Normal 22%' + (h.rincian.pasal31E ? ' dengan fasilitas Pasal 31E' : '')], ['Peredaran bruto', h.bruto]);
+    if (h.rincian.berfasilitas) rows.push(['PPh atas PKP berfasilitas (11%)', h.rincian.pphFasilitas]);
+    if (h.rincian.biasa) rows.push(['PPh atas PKP tanpa fasilitas (22%)', h.rincian.pphBiasa]);
+    rows.push(['PPh terutang', h.pph], ['PPh Pasal 22', inp.kredit.p22], ['PPh Pasal 23 dan 26', inp.kredit.p23], ['PPh Pasal 24', inp.kredit.p24], ['PPh Pasal 25', inp.kredit.p25], ['Total kredit pajak', h.kredit], ['PPh kurang bayar (lebih bayar)', h.selisih]);
+  }
+  add(sheetTabel('Perhitungan SPT Tahunan PPh Badan (perkiraan)', 'Tahun pajak ' + th, ['Uraian', 'Jumlah (Rp)'], rows, [null, FMT_ANGKA], [58, 22]), 'Perhitungan SPT');
+  add(buatSheet(statementAoa('Laporan Laba Rugi', 'Tahun ' + th, lrLines(M, [col]).lines, [col], false)), 'Laba Rugi');
+  add(buatSheet(statementAoa('Laporan Posisi Keuangan (Neraca)', '31 Desember ' + th, nrcLines(M, [col]).lines, [col], false)), 'Neraca');
+  simpanBerkas('bahan-spt-' + th + '-' + slug(M.cfg.perusahaan.nama) + '.xlsx', XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
 }
 
 /* ===== export.js ===== */
@@ -2893,14 +3788,14 @@ const ACT = {
     if (Store.gantiSemua(mulaiDariKosong(nama, th, $('#w-bentuk').value), {})) { UI.tahun = th; UI.tahunSet = true; UI.page = 'ringkasan'; toast('Pembukuan dibuat. Mulai dengan mengisi saldo awal.'); }
   },
   muatContoh() { const d = buildDemo(); if (Store.gantiSemua(d.config, d.months)) { UI.tahunSet = false; UI.page = 'ringkasan'; } },
-  muatContohKonfirm() { konfirmasi('Ganti dengan data contoh?', 'Seluruh data pembukuan Anda saat ini akan <b>diganti</b> dengan data contoh perusahaan fiktif. Unduh cadangan dulu bila perlu.', 'Ganti dengan data contoh', () => ACT.muatContoh(), true); },
+  muatContohKonfirm() { konfirmasi('Ganti dengan data contoh?', 'Seluruh data pembukuan Anda saat ini akan <b>diganti</b> dengan data contoh perusahaan fiktif. Unduh cadangan dulu bila perlu.' + catatCloud(), 'Ganti dengan data contoh', () => ACT.muatContoh(), true); },
   mulaiSendiri() {
     konfirmasi('Hapus data contoh?', 'Semua data contoh dihapus dan Anda mulai dengan pembukuan kosong. Bagan akun standar tetap disiapkan.', 'Hapus dan mulai', () => {
       if (Store.gantiSemua(mulaiDariKosong('Perusahaan Saya', new Date().getFullYear()), {})) { UI.tahun = new Date().getFullYear(); UI.tahunSet = true; UI.page = 'pengaturan'; UI.set.tab = 'profil'; toast('Silakan isi profil perusahaan Anda.'); }
     }, true);
   },
   hapusSemua() {
-    konfirmasi('Hapus semua data?', 'Transaksi, jurnal, dan saldo awal akan dihapus permanen. Profil perusahaan dipertahankan. Unduh cadangan dulu bila perlu.', 'Hapus semua', () => {
+    konfirmasi('Hapus semua data?', 'Transaksi, jurnal, dan saldo awal akan dihapus permanen. Profil perusahaan dipertahankan. Unduh cadangan dulu bila perlu.' + catatCloud(), 'Hapus semua', () => {
       const cfg = mulaiDariKosong(M.cfg.perusahaan.nama, new Date().getFullYear()); cfg.perusahaan = M.cfg.perusahaan;
       if (Store.gantiSemua(cfg, {})) { UI.tahun = new Date().getFullYear(); UI.tahunSet = true; toast('Semua data dihapus.'); }
     }, true);
@@ -2957,6 +3852,7 @@ const ACT = {
   unduhExcel() { unduhExcel(); },
   unduhPdf() { unduhPdf(); },
 };
+Object.assign(ACT, ACT_SYNC, ACT_SPT);
 const ACTC = {
   txAkun() { if (TX && TX.jenis === 'transfer') isiLawan('transfer', $('#f-lawan').value); },
   simpanTeks(el) {
@@ -2966,6 +3862,7 @@ const ACTC = {
   },
 };
 
+Object.assign(ACTC, ACTC_SYNC, ACTC_SPT);
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
@@ -2987,7 +3884,7 @@ document.addEventListener('change', e => {
         const d = JSON.parse(txt);
         if (!d || !d.config || !Array.isArray(d.config.akun) || typeof d.months !== 'object') throw new Error('format');
         Object.keys(d.months).forEach(k => { d.months[k].tx = d.months[k].tx || []; d.months[k].jr = d.months[k].jr || []; });
-        konfirmasi('Pulihkan dari cadangan?', 'Data saat ini akan <b>diganti</b> dengan isi cadangan (' + Object.keys(d.months).length + ' bulan data).', 'Pulihkan', () => { if (Store.gantiSemua(d.config, d.months)) { UI.tahunSet = false; toast('Data dipulihkan dari cadangan.'); } }, true);
+        konfirmasi('Pulihkan dari cadangan?', 'Data saat ini akan <b>diganti</b> dengan isi cadangan (' + Object.keys(d.months).length + ' bulan data).' + catatCloud(), 'Pulihkan', () => { if (Store.gantiSemua(d.config, d.months)) { UI.tahunSet = false; toast('Data dipulihkan dari cadangan.'); } }, true);
       } catch (err) { toast('Berkas bukan cadangan pembukuan yang valid.', true); }
     });
     t.value = '';
