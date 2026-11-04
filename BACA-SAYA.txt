@@ -39,5 +39,10 @@ CATATAN
    dikirim lewat Coretax, sebaiknya dengan konsultan pajak. Aturan tarif bisa berubah, jadi periksa lagi.
    Aplikasi juga mengusulkan koreksi fiskal (sumbangan, jamuan, denda pajak, biaya pribadi) dan membaca
    setoran PPh 25 dari uraian transaksi. Itu hanya usulan dari kata-kata di uraian: periksa tiap item.
+ - Menu Invoice mencatat invoice penjualan dan pembelian, dengan atau tanpa PPN (dipilih per invoice) dan
+   PPh 23 yang dipotong. Jurnal piutang, utang, dan PPN terbentuk otomatis. Invoice bisa dibaca dari PDF
+   berisi teks (bukan hasil scan); hasil bacaan tampil dulu di formulir untuk diperiksa. Pembayaran dicatat
+   dari tombol Terima/Bayar atau dicocokkan otomatis saat impor mutasi bank. Ada rekap PPN dan umur
+   piutang/utang. Faktur pajak resmi tetap dibuat di Coretax; rekap PPN hanya alat bantu.
  - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama (index.html dan sw.js
    wajib ikut diganti agar versi baru terpasang).

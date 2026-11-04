@@ -461,6 +461,10 @@ select.in { padding-right: 6px; }
 .spt-sar-t small { color: var(--ink-3); font-size: 12px; }
 .spt-sar-i .n { flex: none; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
+.in.inv-kurang { border-color: var(--neg); box-shadow: 0 0 0 1px var(--neg); }
+
+@media (max-width: 640px) { .hero.inv-hero { grid-template-columns: 1fr 1fr; gap: 10px; } .hero.inv-hero .tile { padding: 12px; } .hero.inv-hero .tile .v { font-size: 19px; } }
+
 </style>
 </head>
 <body>
@@ -650,7 +654,7 @@ function buatModel(S) {
     });
     (m.jr || []).forEach(j => {
       jrById[j.id] = j;
-      J.push({ id: j.id, tgl: j.tgl, ket: j.ket, ref: j.ref, sumber: 'manual', baris: j.baris });
+      J.push({ id: j.id, tgl: j.tgl, ket: j.ket, ref: j.ref, sumber: 'manual', baris: j.baris, inv: j.inv || null });
     });
   });
   J.forEach((j, i) => { j._i = i; });
@@ -1758,6 +1762,7 @@ const IC = {
   cek: svgI('<path d="m5 12 4.5 4.5L19 7"/>', 16),
   naik: '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1.5 9 8H1z" fill="currentColor"/></svg>',
   turun: '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 8.5 1 2h8z" fill="currentColor"/></svg>',
+  invoice: svgI('<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>'),
   tutup: svgI('<path d="M6 6l12 12M18 6 6 18"/>', 18),
   plus: svgI('<path d="M12 5v14M5 12h14"/>', 16),
   unduh: svgI('<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>', 16),
@@ -1765,6 +1770,7 @@ const IC = {
 const PAGES = [
   { id: 'ringkasan', t: 'Ringkasan', ic: 'ringkasan' },
   { id: 'kas-bank', t: 'Kas & Bank', ic: 'kas' },
+  { id: 'invoice', t: 'Invoice', ic: 'invoice' },
   { id: 'jurnal', t: 'Jurnal & Buku Besar', ic: 'jurnal' },
   { sep: 1 },
   { id: 'laporan', t: 'Laporan Keuangan', ic: 'laporan' },
@@ -1774,7 +1780,7 @@ const PAGES = [
   { sep: 1 },
   { id: 'pengaturan', t: 'Pengaturan', ic: 'setelan' },
 ];
-const APP_VERSI = 'f59adfe50b';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
+const APP_VERSI = '4d57f65629';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
 const versiNyata = () => APP_VERSI.charAt(0) !== '_';
 const sptDilihat = () => { try { return localStorage.getItem('pembukuan.spt.dilihat') === '1'; } catch (e) { return true; } };
 const sptTandaiDilihat = () => { try { localStorage.setItem('pembukuan.spt.dilihat', '1'); } catch (e) { /* abaikan */ } };
@@ -1782,6 +1788,7 @@ const sptSudahDigeser = () => { try { return localStorage.getItem('pembukuan.spt
 const UI = {
   page: 'ringkasan', tahun: new Date().getFullYear(), tahunSet: false,
   kas: { rek: '', bln: '', jenis: '', q: '', lim: 100 },
+  invoice: { tab: 'daftar', jenis: '', status: '', q: '' },
   jurnal: { tab: 'umum', bln: '', sumber: '', akun: '', q: '', lim: 60 },
   lap: { tab: 'lr', periode: 'tahun', tampil: 'banding' },
   set: { tab: 'profil' },
@@ -1886,7 +1893,7 @@ function render() {
   const teksIsi = f && f.tagName === 'INPUT' && /^(text|search|tel|url|email|number)?$/.test(f.type || '') || (f && f.tagName === 'TEXTAREA');
   const fokus = f && f.id && app.contains(f) ? { id: f.id, a: f.selectionStart, b: f.selectionEnd, v: teksIsi ? f.value : null } : null;
   const sy = window.scrollY;
-  const views = { ringkasan: vRingkasan, 'kas-bank': vKas, jurnal: vJurnal, laporan: vLaporan, rekap: vRekap, tahunan: vTahunan, spt: vSpt, pengaturan: vPengaturan };
+  const views = { ringkasan: vRingkasan, 'kas-bank': vKas, invoice: vInvoice, jurnal: vJurnal, laporan: vLaporan, rekap: vRekap, tahunan: vTahunan, spt: vSpt, pengaturan: vPengaturan };
   if (!views[UI.page]) UI.page = 'ringkasan';
   app.innerHTML = kerangka(bannerDemo() + views[UI.page]());
   setelahRender.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
@@ -2112,6 +2119,8 @@ function simpanTx(lagi) {
   if (!lawan) { err.textContent = 'Pilih akun lawan.'; return; }
   if (T.jenis === 'transfer' && lawan === akun) { err.textContent = 'Rekening asal dan tujuan tidak boleh sama.'; return; }
   const item = { id: T.id || uid(), tgl, jenis: T.jenis, akun, lawan, ket, jml, ref };
+  const lama = T.id && M.txById[T.id];
+  if (lama && lama.inv && (lawan === INV_AKUN.piutang[0] || lawan === INV_AKUN.utang[0])) item.inv = lama.inv;   // tetap terhubung ke invoice
   if (!Store.simpanTx(item)) return;
   const th = +tgl.slice(0, 4);
   if (th !== UI.tahun) { UI.tahun = th; toast('Transaksi dicatat di tahun ' + th + '. Tampilan pindah ke tahun itu.'); } else toast(T.id ? 'Transaksi diperbarui.' : 'Transaksi dicatat.');
@@ -2496,6 +2505,7 @@ async function impBacaBerkas(file, kataSandi) {
   } catch (e) { impPesan((e && e.message) || 'Berkas tidak bisa dibaca.'); }
 }
 function tampilImpor() {
+  if (!IMP.dicocokkan) { try { invCocokkan(IMP.rows, invSemua(M, hariIni())); } catch (e) { /* pencocokan invoice hanya bonus */ } IMP.dicocokkan = true; }
   const rows = IMP.rows, n = rows.filter(r => r.pakai).length;
   const lawanOpt = (jenis, sel) => optAkunGrup(a => !a.kas, sel);
   const pdf = /^PDF/.test(IMP.sumber || '');
@@ -2504,7 +2514,7 @@ function tampilImpor() {
     '<p class="note"><b>' + rows.length + ' baris terbaca.</b> Akun lawan dipilih otomatis dari aturan kata kunci. Baris bertanda <span class="chip warn">Cek akun</span> belum cocok aturan mana pun. <span class="chip">Sudah ada</span> berarti transaksi serupa (tanggal, jenis, jumlah) sudah tercatat.</p>' +
     '<div class="tw" style="max-height:52vh;overflow:auto"><table class="t"><thead><tr><th></th><th>Tanggal</th><th>Keterangan</th><th>Akun lawan</th><th class="r">Masuk</th><th class="r">Keluar</th></tr></thead><tbody>' +
     rows.map((r, i) => '<tr><td><input type="checkbox" data-imp="pakai" data-i="' + i + '"' + (r.pakai ? ' checked' : '') + ' aria-label="Catat baris ' + (i + 1) + '"></td><td style="white-space:nowrap">' + tglFmt(r.tgl) + '</td>' +
-      '<td><div class="k1">' + esc(r.ket) + '</div>' + (r.dup ? '<span class="chip">Sudah ada</span>' : !r.cocok ? '<span class="chip warn">Cek akun</span>' : '') + '</td>' +
+      '<td><div class="k1">' + esc(r.ket) + '</div>' + (r.dup ? '<span class="chip">Sudah ada</span>' : r.inv ? '<span class="chip acc" id="imp-chip-' + i + '">Pelunasan invoice ' + esc(r.invNo) + '</span>' : !r.cocok ? '<span class="chip warn">Cek akun</span>' : '') + '</td>' +
       '<td style="min-width:200px"><select class="in sm" data-imp="lawan" data-i="' + i + '" aria-label="Akun lawan baris ' + (i + 1) + '">' + lawanOpt(r.jenis, r.lawan) + '</select></td>' +
       '<td class="n pos">' + (r.jenis === 'masuk' ? angka(r.jml) : '') + '</td><td class="n">' + (r.jenis === 'keluar' ? angka(r.jml) : '') + '</td></tr>').join('') + '</tbody></table></div>' +
     '<p class="note" style="margin-top:8px">Total terbaca: masuk <b>' + angka(rows.reduce((s, r) => s + (r.jenis === 'masuk' ? r.jml : 0), 0)) + '</b>, keluar <b>' + angka(rows.reduce((s, r) => s + (r.jenis === 'keluar' ? r.jml : 0), 0)) + '</b>.</p>';
@@ -2774,7 +2784,7 @@ const ACTC_SYNC = {
 
 /* ===== ui2.js ===== */
 /* ================= Jurnal & Buku Besar ================= */
-const sumberChip = s => (s === 'kas' ? '<span class="chip acc">Kas &amp; Bank</span>' : s === 'manual' ? '<span class="chip warn">Manual</span>' : '<span class="chip">Saldo awal</span>');
+const sumberChip = (s, inv) => (inv ? '<span class="chip acc">Invoice</span>' : s === 'kas' ? '<span class="chip acc">Kas &amp; Bank</span>' : s === 'manual' ? '<span class="chip warn">Manual</span>' : '<span class="chip">Saldo awal</span>');
 const tabsHtml = (items, aktif, act) => '<div class="tabs" role="tablist">' + items.map(([id, t]) => '<button role="tab" aria-selected="' + (aktif === id) + '" data-act="' + act + '" data-t="' + id + '">' + t + '</button>').join('') + '</div>';
 
 function vJurnal() {
@@ -2797,7 +2807,7 @@ function vJurnal() {
   h += '<div class="tw"><table class="t"><thead><tr><th style="width:110px">Tanggal</th><th>Akun</th><th class="r">Debit</th><th class="r">Kredit</th></tr></thead>' +
     tampil.map(j => {
       const edit = j.sumber === 'manual' && Store.canWrite ? '<button class="btn sm" data-act="editJr" data-id="' + esc(j.id) + '">Ubah</button>' : (j.sumber === 'kas' && Store.canWrite ? '<button class="btn sm ghost" data-act="editTx" data-id="' + esc(j.id) + '">Ubah</button>' : '');
-      return '<tbody><tr class="minggu"><td style="white-space:nowrap;font-weight:600">' + tglFmt(j.tgl) + '</td><td colspan="2"><span class="k1">' + esc(j.ket || '(tanpa keterangan)') + '</span> ' + (j.ref ? '<span class="muted mono" style="font-size:11.5px">' + esc(j.ref) + '</span> ' : '') + sumberChip(j.sumber) + '</td><td class="r">' + edit + '</td></tr>' +
+      return '<tbody><tr class="minggu"><td style="white-space:nowrap;font-weight:600">' + tglFmt(j.tgl) + '</td><td colspan="2"><span class="k1">' + esc(j.ket || '(tanpa keterangan)') + '</span> ' + (j.ref ? '<span class="muted mono" style="font-size:11.5px">' + esc(j.ref) + '</span> ' : '') + sumberChip(j.sumber, j.inv) + '</td><td class="r">' + edit + '</td></tr>' +
         j.baris.map(b => '<tr><td></td><td style="padding-left:' + (b.d > 0 ? 12 : 34) + 'px"><span class="kode">' + esc(b.akun) + '</span>' + esc(namaAkun(b.akun)) + '</td><td class="n">' + (b.d ? angka(b.d) : '') + '</td><td class="n">' + (b.k ? angka(b.k) : '') + '</td></tr>').join('') + '</tbody>';
     }).join('') + '</table></div>';
   if (js.length > tampil.length) h += '<div style="text-align:center;margin-top:12px"><button class="btn" data-act="lagiJurnal">Tampilkan lebih banyak (' + (js.length - tampil.length) + ' lagi)</button></div>';
@@ -3214,9 +3224,10 @@ const RE_P25 = /\bPPH\b[\s.\-]*(?:PS|PSL|PASAL)?[\s.\-]*25\b|\bPPH25\b|\bPAJAK P
 function saranSpt(J, am, th) {
   const awal = th + '-01-01', akhir = th + '-12-31', LABA_RUGI = { beban: 1, hpp: 1, beban_lain: 1 };
   const grup = SPT_SARAN.map(g => ({ kat: g.kat, label: g.label, catatan: g.catatan, items: [] }));
-  const p25 = [];
+  const p25 = [], p23 = [];
   (J || []).forEach(j => {
     if (!j.tgl || j.tgl < awal || j.tgl > akhir) return;
+    if (j.inv && j.inv.jenis === 'jual' && +j.inv.pph > 0) p23.push({ kunci: j.id, tgl: j.tgl, ket: 'Invoice ' + (j.inv.no ? j.inv.no + ' · ' : '') + (j.inv.pihak || ''), jml: Math.round(+j.inv.pph) });
     if (j.sumber === 'kas' && j.jenis === 'keluar' && RE_P25.test(j.ket || '')) {
       const d = (j.baris && j.baris[0] && j.baris[0].d) || 0;
       if (d > 0) p25.push({ kunci: j.id, tgl: j.tgl, ket: j.ket, jml: d });
@@ -3232,8 +3243,8 @@ function saranSpt(J, am, th) {
     });
   });
   const urut = (a, b) => (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : 0);
-  grup.forEach(g => g.items.sort(urut)); p25.sort(urut);
-  return { grup: grup.filter(g => g.items.length), p25 };
+  grup.forEach(g => g.items.sort(urut)); p25.sort(urut); p23.sort(urut);
+  return { grup: grup.filter(g => g.items.length), p25, p23 };
 }
 
 /* Perhitungan murni: lr = hasil M.lr() untuk setahun penuh, inp = isian pengguna, th = tahun pajak. */
@@ -3313,13 +3324,18 @@ function sptSaranHtml(S, inp) {
   if (inp.ditolak.length) h += '<p class="note" style="margin:8px 0 0">' + inp.ditolak.length + ' saran diabaikan. <button class="btn sm ghost" type="button" data-act="sptPulihSaran">Tampilkan lagi</button></p>';
   return h + '</div>';
 }
-function sptP25Html(S) {
-  if (!S.p25.length) return '';
-  const tot = S.p25.reduce((s, i) => s + i.jml, 0);
-  return '<details class="spt-sar-g" style="margin-top:12px"><summary><span>Setoran PPh Pasal 25 terbaca dari mutasi bank</span><small>' + S.p25.length + ' transaksi · ' + rp(tot) + '</small></summary>' +
-    '<p class="note" style="margin:6px 0">Dikenali dari kata PPh 25 atau angsuran PPh di uraian. Angsuran masa Desember yang dibayar Januari tahun berikutnya tidak terhitung di sini, sedangkan setoran Januari tahun ini bisa jadi untuk masa Desember tahun lalu. Hilangkan centang bila bukan untuk tahun pajak ini.</p>' +
-    S.p25.map(i => sptItemSaran('p25', i, true)).join('') +
-    '<div class="spt-row" style="margin-top:8px"><button class="btn sm pri" type="button" data-act="sptPakaiP25">Isikan ke PPh Pasal 25</button></div></details>';
+function sptKreditSaranHtml(S) {
+  const blok = (kat, judul, items, aksi, tombol, catatan) => {
+    if (!items.length) return '';
+    const tot = items.reduce((t, i) => t + i.jml, 0);
+    return '<details class="spt-sar-g" style="margin-top:12px"><summary><span>' + judul + '</span><small>' + items.length + ' ' + (kat === 'p25' ? 'transaksi' : 'invoice') + ' · ' + rp(tot) + '</small></summary>' +
+      '<p class="note" style="margin:6px 0">' + catatan + '</p>' + items.map(i => sptItemSaran(kat, i, true)).join('') +
+      '<div class="spt-row" style="margin-top:8px"><button class="btn sm pri" type="button" data-act="' + aksi + '">' + tombol + '</button></div></details>';
+  };
+  return blok('p25', 'Setoran PPh Pasal 25 terbaca dari mutasi bank', S.p25, 'sptPakaiP25', 'Isikan ke PPh Pasal 25',
+      'Dikenali dari kata PPh 25 atau angsuran PPh di uraian. Angsuran masa Desember yang dibayar Januari tahun berikutnya tidak terhitung di sini, sedangkan setoran Januari tahun ini bisa jadi untuk masa Desember tahun lalu. Hilangkan centang bila bukan untuk tahun pajak ini.') +
+    blok('p23', 'Potongan PPh 23 pada invoice penjualan', S.p23 || [], 'sptPakaiP23', 'Isikan ke PPh Pasal 23 dan 26',
+      'Diambil dari kolom PPh 23 yang Anda isi di invoice penjualan. Pastikan pelanggan benar-benar memberi bukti potong; kredit pajak hanya sah dengan bukti potong yang sesuai. Hilangkan centang pada yang belum ada bukti potongnya.');
 }
 const sptSaranKini = () => saranSpt(M.J, M.am, UI.tahun);
 const sptTarifTeks = h => (h.tarif === 'final' ? 'PPh final UMKM 0,5% dari peredaran usaha' : 'Tarif normal 22%' + (h.bruto <= SPT_B50 ? ' dengan fasilitas Pasal 31E' : ''));
@@ -3398,7 +3414,7 @@ function vSpt() {
   } else {
     tarifBlok += fldU('spt-bruto', 'Peredaran bruto (acuan batas Rp4,8 miliar dan Rp50 miliar)', inp.bruto, ' placeholder="' + fmtN.format(h.brutoAuto) + '"') + '<div class="fld"><span class="lbl">Otomatis dari pembukuan</span><div class="hint" style="padding-top:10px">' + rp(h.brutoAuto) + ' (pendapatan usaha + pendapatan lain). Isi kolom di samping bila peredaran bruto menurut aturan berbeda; kosongkan untuk memakai angka otomatis.</div></div></div>';
     kreditBlok = '<h3 style="margin:16px 0 8px;font-size:14px">Kredit pajak (sudah dibayar atau dipotong pihak lain)</h3><div class="grid2">' +
-      fldU('spt-k22', 'PPh Pasal 22', inp.kredit.p22) + fldU('spt-k23', 'PPh Pasal 23 dan 26', inp.kredit.p23) + fldU('spt-k24', 'PPh Pasal 24 (luar negeri)', inp.kredit.p24) + fldU('spt-k25', 'PPh Pasal 25 (angsuran bulanan)', inp.kredit.p25) + '</div>' + sptP25Html(sptSaranKini());
+      fldU('spt-k22', 'PPh Pasal 22', inp.kredit.p22) + fldU('spt-k23', 'PPh Pasal 23 dan 26', inp.kredit.p23) + fldU('spt-k24', 'PPh Pasal 24 (luar negeri)', inp.kredit.p24) + fldU('spt-k25', 'PPh Pasal 25 (angsuran bulanan)', inp.kredit.p25) + '</div>' + sptKreditSaranHtml(sptSaranKini());
   }
   o += '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>3. Perhitungan PPh terutang</h2><span class="sub" id="spt-tarifteks">' + esc(sptTarifTeks(h)) + '</span></div>' +
     '<div id="spt-calc">' + sptCalcHtml(h) + '</div>' + tarifBlok + '<div id="spt-out1">' + sptOut1Html(h) + '</div>' + kreditBlok + '<div id="spt-out2">' + sptOut2Html(h) + '</div><div id="spt-warn">' + sptWarnHtml(h) + '</div>' +
@@ -3477,15 +3493,17 @@ const ACT_SPT = {
     if (sptSimpanNilai(o)) { render(); toast('Saran diabaikan. Bisa ditampilkan lagi di bawah daftar saran.'); }
   },
   sptPulihSaran() { const o = sptBaca(); o.ditolak = []; if (sptSimpanNilai(o)) render(); },
-  sptPakaiP25() {
-    const S = sptSaranKini(), pilih = new Set(Array.from(document.querySelectorAll('input[data-sar="p25"]:checked')).map(e => e.value));
-    const it = S.p25.filter(i => pilih.has(i.kunci));
-    if (!it.length) { toast('Centang dulu setoran yang mau dipakai.', true); return; }
-    const o = sptBaca(), tot = Math.round(it.reduce((s, i) => s + i.jml, 0));
-    o.kredit.p25 = tot;
-    if (sptSimpanNilai(o)) { render(); toast('PPh Pasal 25 diisi ' + rp(tot) + '. Cocokkan dengan bukti setor.'); }
-  },
+  sptPakaiP25() { sptPakaiKredit('p25', 'p25', 'PPh Pasal 25'); },
+  sptPakaiP23() { sptPakaiKredit('p23', 'p23', 'PPh Pasal 23 dan 26'); },
 };
+function sptPakaiKredit(kat, kolom, nama) {
+  const S = sptSaranKini(), pilih = new Set(Array.from(document.querySelectorAll('input[data-sar="' + kat + '"]:checked')).map(e => e.value));
+  const it = (S[kat] || []).filter(i => pilih.has(i.kunci));
+  if (!it.length) { toast('Centang dulu yang mau dipakai.', true); return; }
+  const o = sptBaca(), tot = Math.round(it.reduce((t, i) => t + i.jml, 0));
+  o.kredit[kolom] = tot;
+  if (sptSimpanNilai(o)) { render(); toast(nama + ' diisi ' + rp(tot) + '. Cocokkan dengan bukti setor atau bukti potong.'); }
+}
 const ACTC_SPT = {
   sptSimpan() {
     const o = sptBaca(), lama = sptGabung((((M.cfg.laporan || {})[UI.tahun]) || {}).spt);
@@ -3518,6 +3536,543 @@ function unduhSpt() {
   add(buatSheet(statementAoa('Laporan Posisi Keuangan (Neraca)', '31 Desember ' + th, nrcLines(M, [col]).lines, [col], false)), 'Neraca');
   simpanBerkas('bahan-spt-' + th + '-' + slug(M.cfg.perusahaan.nama) + '.xlsx', XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
 }
+
+/* ===== invoice.js ===== */
+/* ================= Invoice penjualan dan pembelian =================
+   Satu invoice disimpan sebagai jurnal (jr) yang punya bidang `inv`, jadi penyimpanan, sinkronisasi,
+   dan cadangan memakai jalur yang sama dengan jurnal manual. Pelunasan adalah transaksi kas/bank biasa
+   yang menunjuk ke invoice lewat bidang `inv`.                                                    */
+const INV_AKUN = {
+  piutang: ['1-1300', 'Piutang Usaha', 'aset_lancar'],
+  utang: ['2-1100', 'Utang Usaha', 'kewajiban_pendek'],
+  pphKredit: ['1-1610', 'PPh 23 Dipotong Pelanggan (Kredit Pajak)', 'aset_lancar'],
+  ppnMasuk: ['1-1650', 'PPN Masukan', 'aset_lancar'],
+  ppnKeluar: ['2-1350', 'PPN Keluaran', 'kewajiban_pendek'],
+  utangPph: ['2-1360', 'Utang PPh Dipotong (PPh 23)', 'kewajiban_pendek'],
+};
+const INV_PPN = { '11': 0.11, '12': 0.12 };
+const invBulat = n => Math.round(+n || 0);
+
+/* ----- jurnal otomatis ----- */
+function invBaris(inv) {
+  const dpp = invBulat(inv.dpp), ppn = invBulat(inv.ppn), pph = invBulat(inv.pph), A = INV_AKUN, b = [];
+  if (inv.jenis === 'jual') {
+    b.push({ akun: A.piutang[0], d: dpp + ppn - pph, k: 0 });
+    if (pph > 0) b.push({ akun: A.pphKredit[0], d: pph, k: 0 });
+    b.push({ akun: inv.akun, d: 0, k: dpp });
+    if (ppn > 0) b.push({ akun: A.ppnKeluar[0], d: 0, k: ppn });
+  } else {
+    b.push({ akun: inv.akun, d: dpp, k: 0 });
+    if (ppn > 0) b.push({ akun: A.ppnMasuk[0], d: ppn, k: 0 });
+    b.push({ akun: A.utang[0], d: 0, k: dpp + ppn - pph });
+    if (pph > 0) b.push({ akun: A.utangPph[0], d: 0, k: pph });
+  }
+  return b.filter(x => x.d > 0 || x.k > 0);
+}
+// akun sistem yang dipakai invoice ini dan belum ada di bagan akun
+function invAkunKurang(inv, am) {
+  const A = INV_AKUN, perlu = inv.jenis === 'jual' ? [A.piutang] : [A.utang];
+  if (invBulat(inv.ppn) > 0) perlu.push(inv.jenis === 'jual' ? A.ppnKeluar : A.ppnMasuk);
+  if (invBulat(inv.pph) > 0) perlu.push(inv.jenis === 'jual' ? A.pphKredit : A.utangPph);
+  return perlu.filter(a => !am[a[0]]);
+}
+
+/* ----- tanggal ----- */
+const invSelisihHari = (a, b) => { const p = s => { const x = s.split('-'); return Date.UTC(+x[0], +x[1] - 1, +x[2]); }; return Math.round((p(a) - p(b)) / 864e5); };
+function invTambahHari(iso, n) { const x = iso.split('-'), d = new Date(Date.UTC(+x[0], +x[1] - 1, +x[2] + n)); return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate()); }
+
+/* ----- daftar invoice dengan status pembayaran ----- */
+function invSemua(M, hari) {
+  const net = {};
+  M.txAll.forEach(t => { if (t.inv) net[t.inv] = (net[t.inv] || 0) + (t.jenis === 'masuk' ? t.jml : t.jenis === 'keluar' ? -t.jml : 0); });
+  const out = [];
+  Object.keys(M.jrById).forEach(id => {
+    const j = M.jrById[id], v = j.inv;
+    if (!v) return;
+    const dpp = invBulat(v.dpp), ppn = invBulat(v.ppn), pph = invBulat(v.pph), bersih = dpp + ppn - pph;
+    const dibayar = (v.jenis === 'jual' ? 1 : -1) * (net[id] || 0), sisa = bersih - dibayar;
+    const lunas = sisa <= 0.5;
+    const telat = !lunas && v.tempo && hari && v.tempo < hari ? invSelisihHari(hari, v.tempo) : 0;
+    out.push({ id, tgl: j.tgl, jenis: v.jenis, no: v.no || j.ref || '', pihak: v.pihak || '', tempo: v.tempo || '', ket: j.ket || '', akun: v.akun, dpp, ppn, pph, total: dpp + ppn, bersih, dibayar, sisa, lunas, telat, status: lunas ? 'lunas' : dibayar > 0.5 ? 'sebagian' : 'belum' });
+  });
+  out.sort((a, b) => (a.tgl < b.tgl ? 1 : a.tgl > b.tgl ? -1 : a.no < b.no ? 1 : -1));
+  return out;
+}
+function invRekapPpn(list, th) {
+  const r = [];
+  for (let m = 1; m <= 12; m++) r.push({ ym: th + '-' + pad2(m), keluar: 0, masuk: 0, dppJual: 0, dppBeli: 0 });
+  list.forEach(i => {
+    if (i.tgl.slice(0, 4) !== String(th)) return;
+    const e = r[+i.tgl.slice(5, 7) - 1];
+    if (i.jenis === 'jual') { e.dppJual += i.dpp; e.keluar += i.ppn; } else { e.dppBeli += i.dpp; e.masuk += i.ppn; }
+  });
+  r.forEach(e => { e.selisih = e.keluar - e.masuk; });
+  return r;
+}
+const INV_UMUR = [['belum', 'Belum jatuh tempo'], ['tanpa', 'Tanpa jatuh tempo'], ['d30', 'Lewat 1–30 hari'], ['d60', 'Lewat 31–60 hari'], ['d90', 'Lewat 61–90 hari'], ['d91', 'Lewat lebih dari 90 hari']];
+function invUmur(list, jenis) {
+  const r = {}; INV_UMUR.forEach(u => { r[u[0]] = 0; });
+  list.forEach(i => {
+    if (i.jenis !== jenis || i.sisa <= 0.5) return;
+    const k = !i.tempo ? 'tanpa' : i.telat <= 0 ? 'belum' : i.telat <= 30 ? 'd30' : i.telat <= 60 ? 'd60' : i.telat <= 90 ? 'd90' : 'd91';
+    r[k] += i.sisa;
+  });
+  return r;
+}
+
+/* ================= Membaca invoice dari teks PDF ================= */
+const INV_BLN = 'Januari|Februari|Maret|April|Mei|Juni|Juli|Agustus|September|Oktober|November|Desember|January|February|March|May|June|July|August|October|December|Sept|Jan|Feb|Mar|Apr|Jun|Jul|Agu|Ags|Agt|Aug|Sep|Okt|Oct|Nov|Des|Dec';
+function invCariTgl(s) {
+  s = String(s || '');
+  let m, t;
+  if ((m = s.match(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b/)) && (t = parseTgl(m[0]))) return t;
+  if ((m = s.match(/\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b/)) && (t = parseTgl(m[0]))) return t;
+  if ((m = s.match(new RegExp('\\b(\\d{1,2})[ .-]*(' + INV_BLN + ')[a-z]*\\.?,?[ .-]*(\\d{4}|\\d{2})\\b', 'i'))) && (t = parseTgl(m[1] + ' ' + m[2].slice(0, 3) + ' ' + m[3]))) return t;
+  if ((m = s.match(new RegExp('\\b(' + INV_BLN + ')[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})\\b', 'i'))) && (t = parseTgl(m[2] + ' ' + m[1].slice(0, 3) + ' ' + m[3]))) return t;
+  return null;
+}
+// angka uang terakhir pada satu baris (persentase dan tanggal diabaikan)
+function invAngkaBaris(s) {
+  s = String(s || '').replace(/\d{1,3}(?:[.,]\d+)?\s*%/g, ' ');
+  s = s.replace(/\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b/g, ' ').replace(/\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b/g, ' ');
+  const tok = s.match(/\(?-?\d[\d.,]*\)?/g) || [];
+  let hasil = null;
+  tok.forEach(x => {
+    const digit = x.replace(/\D/g, '');
+    if (!(digit.length >= 4 || /[.,]\d{3}/.test(x))) return;
+    hasil = Math.abs(parseAngka(x));
+  });
+  return hasil;
+}
+function invKelas(l) {
+  const t = l.toLowerCase();
+  if (/dpp\s*nilai\s*lain/.test(t)) return 'dppnl';
+  if (/(sebelum|before|excl\w*|belum\s*termasuk|tidak\s*termasuk|tanpa)\s*(ppn|pajak|vat|tax)/.test(t)) return 'dpp';
+  if (/(setelah|sesudah|termasuk|incl\w*|after|dengan)\s*(ppn|pajak|vat|tax)/.test(t) && /total|jumlah|amount/.test(t)) return 'total';
+  if (/\bpph\b|withholding|potongan\s*pajak/.test(t)) return 'pph';
+  if (/\bdpp\b|dasar\s*pengenaan\s*pajak/.test(t)) return 'dpp';
+  if (/\bppn\b|\bvat\b|pajak\s*pertambahan\s*nilai|\bgst\b/.test(t)) return 'ppn';
+  if (/\bsub\s*-?\s*total\b|jumlah\s*harga|\bjumlah\s*\(?rp\)?\s*[:.]?\s*$|\bnet\s*amount\b/.test(t)) return 'sub';
+  if (/\bgrand\s*total\b|\btotal\b(?!\s*(?:qty|item|berat|kuantitas|barang))|amount\s*due|balance\s*due|jumlah\s*(?:tagihan|bayar|pembayaran|yang\s*harus)|\btagihan\b/.test(t)) return 'total';
+  return null;
+}
+const INV_LABEL_PIHAK = {
+  jual: /^(?:kepada(?:\s+yth\.?)?|bill(?:ed)?\s*to|ditagihkan\s*(?:kepada|ke)|customer|pelanggan|klien|client|sold\s*to|penerima)\b\s*[:.\-]?\s*(.*)$/i,
+  beli: /^(?:dari|from|vendor|supplier|pemasok|penjual|diterbitkan\s*oleh|issued\s*by)\b\s*[:.\-]?\s*(.*)$/i,
+};
+const invBukanLabel = l => !/[A-Za-z]{3}/.test(l) || /:\s*$/.test(l) || /^(?:tanggal|date|no\b|nomor|alamat|address|telp|phone|npwp|email|ship|kirim|jatuh|due|invoice|faktur)\b/i.test(l);
+function invParse(baris, jenis, hari) {
+  const L = (baris || []).map(x => String(x || '').replace(/[ \t]+/g, ' ').trim()).filter(Boolean);
+  const gabung = l => l.replace(/\s{2,}/g, ' ');
+  const hasil = { jenis, no: '', tgl: '', tempo: '', pihak: '', ket: '', dpp: 0, ppn: 0, pph: 0, ppnMode: 'tanpa', catatan: [], hilang: [] };
+  // nomor invoice
+  const pola = [
+    /\b(?:no\.?|nomor|number|#)\s*(?:invoice|inv|faktur|tagihan)\b\s*[:.#-]?\s*([A-Z0-9][A-Z0-9/\-._]{2,})/i,
+    /\b(?:invoice|faktur|tagihan|inv)\s*(?:no|nomor|number|num|#)\.?\s*[:.#-]?\s*([A-Z0-9][A-Z0-9/\-._]{2,})/i,
+    /\binvoice\s*[:#]\s*([A-Z0-9][A-Z0-9/\-._]{2,})/i,
+  ];
+  const nomorOk = v => v && /\d/.test(v) && !/^(date|tanggal|tgl)/i.test(v);
+  for (const re of pola) {
+    for (const l of L) { const m = gabung(l).match(re); if (m && nomorOk(m[1])) { hasil.no = m[1].replace(/[.,;:]+$/, ''); break; } }
+    if (hasil.no) break;
+  }
+  if (!hasil.no) for (const l of L) { const m = l.match(/\bINV[/\-._]?[A-Z0-9][A-Z0-9/\-._]*/); if (m && /\d/.test(m[0])) { hasil.no = m[0].replace(/[.,;:]+$/, ''); break; } }
+  if (!hasil.no) for (let i = 0; i < Math.min(L.length, 8); i++) {
+    if (/\b(invoice|faktur|tagihan)\b/i.test(L[i]) && !hasil.no) {
+      for (let k = i; k < Math.min(L.length, i + 4); k++) { const m = gabung(L[k]).match(/^(?:no|nomor)\.?\s*[:.#-]?\s*([A-Z0-9][A-Z0-9/\-._]{2,})/i); if (m && nomorOk(m[1])) { hasil.no = m[1]; break; } }
+    }
+  }
+  // tanggal invoice dan jatuh tempo
+  const reTempo = /jatuh\s*tempo|due\s*date|tgl\.?\s*tempo|batas\s*(?:waktu\s*)?pembayaran|payment\s*due|dibayar\s*(?:paling\s*lambat|selambat)/i;
+  const reTgl = /\b(?:tanggal|tgl\.?|date)\b/i;
+  for (let i = 0; i < L.length && !hasil.tgl; i++) {
+    if (reTgl.test(L[i]) && !reTempo.test(L[i]) && !/cetak|print|kirim|ship|delivery/i.test(L[i])) { hasil.tgl = invCariTgl(L[i]) || (i + 1 < L.length && !/:\s*\S/.test(L[i]) ? invCariTgl(L[i + 1]) : '') || ''; }
+  }
+  for (let i = 0; i < L.length; i++) {
+    if (reTempo.test(L[i])) { const t = invCariTgl(L[i]) || (i + 1 < L.length ? invCariTgl(L[i + 1]) : null); if (t) { hasil.tempo = t; break; } }
+  }
+  if (!hasil.tgl) for (const l of L.slice(0, 25)) { if (reTempo.test(l)) continue; const t = invCariTgl(l); if (t && t !== hasil.tempo) { hasil.tgl = t; break; } }
+  if (!hasil.tempo && hasil.tgl) {
+    for (const l of L) {
+      const m = l.match(/(?:termin|terms?|tempo|jangka\s*waktu|pembayaran)\D{0,18}?(\d{1,3})\s*(?:hari|days?)\b/i) || l.match(/\bnet\s*(\d{1,3})\b/i);
+      if (m && +m[1] > 0 && +m[1] <= 365) { hasil.tempo = invTambahHari(hasil.tgl, +m[1]); hasil.catatan.push('Jatuh tempo dihitung dari termin ' + m[1] + ' hari.'); break; }
+    }
+  }
+  // pihak
+  const lb = INV_LABEL_PIHAK[jenis];
+  for (let i = 0; i < L.length && !hasil.pihak; i++) {
+    const m = gabung(L[i]).match(lb);
+    if (!m) continue;
+    let v = (m[1] || '').trim();
+    if (!v || invBukanLabel(v)) { v = ''; for (let k = i + 1; k < Math.min(L.length, i + 4); k++) { const x = L[k].split(/\s{2,}/)[0].trim(); if (x && !invBukanLabel(x) && !lb.test(x)) { v = x; break; } } }
+    v = v.split(/\s{2,}/)[0].replace(/^(yth\.?|bapak\/ibu|bapak|ibu)\s+/i, '').trim();
+    if (v && /[A-Za-z]{3}/.test(v)) hasil.pihak = v;
+  }
+  if (!hasil.pihak && jenis === 'beli') {
+    for (const l of L.slice(0, 6)) { const x = l.split(/\s{2,}/)[0].trim(); if (/[A-Za-z]{3}/.test(x) && !/\b(invoice|faktur|tagihan|receipt|kwitansi|nota|pajak)\b/i.test(x) && !/^\d/.test(x)) { hasil.pihak = x; break; } }
+  }
+  // jumlah
+  const nilai = { dpp: null, sub: null, ppn: null, pph: null, total: null };
+  L.forEach(l => {
+    const k = invKelas(l); if (!k || k === 'dppnl') return;
+    const v = invAngkaBaris(l); if (v == null) return;
+    nilai[k] = v;
+  });
+  const T = nilai.total, dppC = nilai.dpp != null ? nilai.dpp : nilai.sub;
+  let dpp = dppC, ppn = nilai.ppn;
+  const pph = nilai.pph || 0;
+  if (dpp != null && ppn == null && T != null) {
+    const sel = T - dpp;
+    if (sel > 0.5) { ppn = sel; hasil.catatan.push('PPN dihitung dari selisih total dan DPP, karena barisnya tidak terbaca.'); } else ppn = 0;
+  } else if (dpp == null && T != null) {
+    if (ppn != null && T > ppn) { dpp = T - ppn; hasil.catatan.push('DPP dihitung dari total dikurangi PPN.'); }
+    else { dpp = T; ppn = ppn || 0; hasil.catatan.push('Hanya total yang terbaca, jadi dianggap tanpa PPN.'); }
+  }
+  hasil.dpp = dpp || 0; hasil.ppn = ppn || 0; hasil.pph = pph;
+  if (T != null && dpp != null) {
+    const a = hasil.dpp + hasil.ppn, b = a - hasil.pph;
+    if (Math.abs(T - a) > 1 && Math.abs(T - b) > 1) hasil.catatan.push('Total di PDF (' + fmtN.format(T) + ') tidak sama dengan DPP + PPN (' + fmtN.format(a) + '). Periksa angkanya.');
+  }
+  if (hasil.ppn > 0 && hasil.dpp > 0) {
+    const r = hasil.ppn / hasil.dpp;
+    hasil.ppnMode = Math.abs(r - 0.11) < 0.002 ? '11' : Math.abs(r - 0.12) < 0.002 ? '12' : 'sendiri';
+  }
+  // keterangan: baris pertama di bawah judul kolom uraian
+  for (let i = 0; i < L.length - 1; i++) {
+    if (/^(?:no\.?\s+)?(?:deskripsi|uraian|description|nama\s*(?:barang|jasa|produk)|item)\b/i.test(L[i])) {
+      const x = gabung(L[i + 1]).replace(/^\d+[.)]?\s+/, '').replace(/(?:\s+(?:Rp\.?\s*)?[\d.,]+)+\s*$/, '').trim();
+      if (x && /[A-Za-z]{3}/.test(x) && invKelas(x) == null) { hasil.ket = x; break; }
+    }
+  }
+  if (!hasil.no) hasil.hilang.push('no');
+  if (!hasil.tgl) hasil.hilang.push('tgl');
+  if (!hasil.pihak) hasil.hilang.push('pihak');
+  if (!hasil.dpp) hasil.hilang.push('dpp');
+  if (!hasil.tgl) hasil.tgl = hari || '';
+  return hasil;
+}
+async function invBacaPdf(file) {
+  const lib = await muatPdfJs();
+  const data = new Uint8Array(await file.arrayBuffer());
+  let doc;
+  try { doc = await lib.getDocument({ data, isEvalSupported: false }).promise; }
+  catch (e) {
+    if (e && e.name === 'PasswordException') throw new Error('PDF dikunci kata sandi. Buka kuncinya dulu, lalu coba lagi.');
+    throw new Error('PDF tidak bisa dibuka. Pastikan berkasnya tidak rusak.');
+  }
+  const baris = [];
+  for (let p = 1; p <= Math.min(doc.numPages, 6); p++) {
+    const pg = await doc.getPage(p), tc = await pg.getTextContent();
+    barisPdf(tc.items).forEach(b => baris.push(b.sel.map(c => c.t).join('  ')));
+  }
+  if (baris.join('').replace(/\s/g, '').length < 25) throw new Error('PDF ini tampaknya berupa gambar (hasil scan atau foto), jadi tulisannya tidak bisa dibaca. Pakai PDF asli dari aplikasi invoice, atau isi manual.');
+  return baris;
+}
+
+/* ================= Pencocokan dengan mutasi bank ================= */
+const INV_ABAIKAN = /^(PT|CV|UD|PD|TBK|FA|KOPERASI|YAYASAN|TOKO|DAN|THE|INC|LTD|CO|CORP)$/;
+function invNamaCocok(pihak, ket) {
+  const k = String(ket || '').toUpperCase();
+  const kata = String(pihak || '').toUpperCase().split(/[^A-Z0-9]+/).filter(w => w.length >= 4 && !INV_ABAIKAN.test(w));
+  return kata.some(w => k.indexOf(w) >= 0);
+}
+function invCocokkan(rows, daftar) {
+  const dipakai = new Set(), terbuka = daftar.filter(i => i.sisa > 0.5);
+  rows.forEach(r => {
+    delete r.inv; delete r.invNo;
+    if (r.dup) return;
+    const jenis = r.jenis === 'masuk' ? 'jual' : r.jenis === 'keluar' ? 'beli' : null;
+    if (!jenis) return;
+    const kand = terbuka.filter(i => i.jenis === jenis && !dipakai.has(i.id) && Math.abs(i.sisa - r.jml) < 0.5);
+    let pilih = null;
+    if (kand.length === 1) pilih = kand[0];
+    else if (kand.length > 1) {
+      const up = String(r.ket || '').toUpperCase();
+      const k1 = kand.filter(i => i.no && i.no.length >= 3 && up.indexOf(i.no.toUpperCase()) >= 0);
+      if (k1.length === 1) pilih = k1[0];
+      else { const k2 = kand.filter(i => invNamaCocok(i.pihak, r.ket)); if (k2.length === 1) pilih = k2[0]; }
+    }
+    if (pilih) { dipakai.add(pilih.id); r.inv = pilih.id; r.invNo = pilih.no || pilih.pihak; r.lawan = jenis === 'jual' ? INV_AKUN.piutang[0] : INV_AKUN.utang[0]; r.cocok = true; }
+  });
+  return rows;
+}
+
+/* ===== invoice_ui.js ===== */
+/* ================= Invoice: halaman, formulir, pembayaran, baca PDF ================= */
+let INV = null, INVQ = null;
+const invJenisTeks = j => (j === 'jual' ? 'Penjualan' : 'Pembelian');
+const invChipStatus = i => (i.lunas ? '<span class="chip ok">Lunas</span>' : i.telat > 0 ? '<span class="chip warn">Lewat ' + i.telat + ' hari</span>' : i.status === 'sebagian' ? '<span class="chip">Dibayar sebagian</span>' : '<span class="chip">Belum dibayar</span>');
+const invUang = n => (n ? fmtN.format(Math.round(n)) : '');
+
+function vInvoice() {
+  const th = UI.tahun, f = UI.invoice, hari = hariIni(), semua = invSemua(M, hari);
+  const buka = j => semua.filter(i => i.jenis === j && i.sisa > 0.5);
+  const jml = (a, k) => a.reduce((s, i) => s + i[k], 0);
+  const pj = buka('jual'), pb = buka('beli'), pjT = pj.filter(i => i.telat > 0), pbT = pb.filter(i => i.telat > 0);
+  let h = kepala('Invoice', 'Tagihan ke pelanggan dan dari pemasok, dengan atau tanpa PPN.',
+    (Store.canWrite ? '<button class="btn" data-act="invPdf">Baca dari PDF</button><button class="btn pri" data-act="invBaru">' + IC.plus + ' Invoice</button>' : '') +
+    (semua.length ? '<button class="btn" data-act="invUnduh">' + IC.unduh + ' Excel</button>' : ''));
+  h += '<section class="hero inv-hero" aria-label="Ringkasan invoice">' +
+    '<div class="tile"><div class="k">Piutang belum dibayar</div><div class="v">' + rpV(jml(pj, 'sisa')) + '</div><div class="d"><span>' + pj.length + ' invoice penjualan</span></div></div>' +
+    '<div class="tile"><div class="k">Utang belum dibayar</div><div class="v">' + rpV(jml(pb, 'sisa')) + '</div><div class="d"><span>' + pb.length + ' invoice pembelian</span></div></div>' +
+    '<div class="tile"><div class="k">Piutang lewat jatuh tempo</div><div class="v">' + rpV(jml(pjT, 'sisa')) + '</div><div class="d"><span>' + pjT.length + ' invoice</span></div></div>' +
+    '<div class="tile"><div class="k">Utang lewat jatuh tempo</div><div class="v">' + rpV(jml(pbT, 'sisa')) + '</div><div class="d"><span>' + pbT.length + ' invoice</span></div></div></section>';
+  h += tabsHtml([['daftar', 'Daftar'], ['ppn', 'Rekap PPN'], ['umur', 'Piutang & Utang']], f.tab, 'tabInv');
+  if (!semua.length) {
+    return h + '<div class="panel"><div class="empty"><b>Belum ada invoice.</b>Catat invoice penjualan atau pembelian. Jurnal piutang, utang, dan PPN terbentuk otomatis, dan pelunasannya bisa dicocokkan dengan mutasi bank.' +
+      (Store.canWrite ? '<div style="margin-top:12px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="btn pri" data-act="invPdf">Baca dari PDF</button><button class="btn" data-act="invBaru">Isi manual</button></div>' : '') + '</div></div>';
+  }
+  if (f.tab === 'ppn') return h + invPpnHtml(semua, th);
+  if (f.tab === 'umur') return h + invUmurHtml(semua);
+
+  const lintas = f.status === 'terbuka' || f.status === 'lewat';
+  let js = semua;
+  if (f.jenis) js = js.filter(i => i.jenis === f.jenis);
+  if (!lintas) js = js.filter(i => i.tgl.slice(0, 4) === String(th));
+  if (f.status === 'terbuka') js = js.filter(i => i.sisa > 0.5);
+  if (f.status === 'lewat') js = js.filter(i => i.telat > 0);
+  if (f.status === 'lunas') js = js.filter(i => i.lunas);
+  if (f.q) { const q = f.q.toLowerCase(); js = js.filter(i => (i.no + ' ' + i.pihak + ' ' + i.ket).toLowerCase().indexOf(q) >= 0); }
+  h += '<div class="bar"><select class="in" data-ui="invoice.jenis" aria-label="Jenis invoice" style="width:auto">' + opt('', 'Semua jenis', f.jenis) + opt('jual', 'Penjualan', f.jenis) + opt('beli', 'Pembelian', f.jenis) + '</select>' +
+    '<select class="in" data-ui="invoice.status" aria-label="Status pembayaran" style="width:auto">' + opt('', 'Semua status (tahun ' + th + ')', f.status) + opt('terbuka', 'Belum lunas (semua tahun)', f.status) + opt('lewat', 'Lewat jatuh tempo (semua tahun)', f.status) + opt('lunas', 'Lunas', f.status) + '</select>' +
+    '<input class="in" type="search" id="inv-q" data-uiq="invoice.q" value="' + esc(f.q) + '" placeholder="Cari nomor, pihak, keterangan" aria-label="Cari invoice" style="flex:1 1 180px;min-width:0"></div>';
+  if (!js.length) return h + '<div class="panel"><div class="empty"><b>Tidak ada invoice yang cocok.</b>Ubah filter di atas' + (lintas ? '' : ' atau pilih tahun lain di pojok kanan atas') + '.</div></div>';
+  const tampil = js.slice(0, 200);
+  h += '<div class="tw"><table class="t"><thead><tr><th>Tanggal</th><th>Invoice</th><th class="r">Tagihan bersih</th><th class="r">Sisa</th><th></th></tr></thead><tbody>' + tampil.map(i =>
+    '<tr><td style="white-space:nowrap;vertical-align:top">' + tglFmt(i.tgl) + (i.tempo ? '<div class="k2">tempo ' + tglFmt(i.tempo) + '</div>' : '') + '</td>' +
+    '<td><div class="k1">' + esc(i.pihak || '(tanpa nama)') + '</div><div class="k2">' + (i.no ? esc(i.no) + ' · ' : '') + invJenisTeks(i.jenis) + (i.ppn > 0 ? ' · PPN ' + angka(i.ppn) : '') + (i.pph > 0 ? ' · PPh ' + angka(i.pph) : '') + '</div>' + invChipStatus(i) + '</td>' +
+    '<td class="n">' + angka(i.bersih) + '</td><td class="n' + (i.sisa > 0.5 ? '' : ' muted') + '">' + (i.sisa > 0.5 ? angka(i.sisa) : '–') + '</td>' +
+    '<td class="r" style="white-space:nowrap">' + (Store.canWrite ? (i.sisa > 0.5 ? '<button class="btn sm" data-act="invBayar" data-id="' + esc(i.id) + '">' + (i.jenis === 'jual' ? 'Terima' : 'Bayar') + '</button> ' : '') + '<button class="btn sm ghost" data-act="invEdit" data-id="' + esc(i.id) + '">Ubah</button>' : '') + '</td></tr>').join('') + '</tbody></table></div>';
+  if (js.length > tampil.length) h += '<p class="note" style="margin-top:8px">Menampilkan ' + tampil.length + ' dari ' + js.length + ' invoice. Persempit dengan filter atau pencarian.</p>';
+  return h;
+}
+function invPpnHtml(semua, th) {
+  const r = invRekapPpn(semua, th), T = r.reduce((s, e) => ({ dppJual: s.dppJual + e.dppJual, keluar: s.keluar + e.keluar, dppBeli: s.dppBeli + e.dppBeli, masuk: s.masuk + e.masuk }), { dppJual: 0, keluar: 0, dppBeli: 0, masuk: 0 });
+  const selisih = T.keluar - T.masuk;
+  const sel = (n) => '<td class="n' + (n < -0.5 ? ' neg' : '') + '">' + (Math.abs(n) < 0.5 ? '–' : angka(n)) + '</td>';
+  return '<div class="panel"><div class="panel-h"><h2>Rekap PPN tahun ' + th + '</h2><span class="sub">Dari invoice yang dicatat, menurut tanggal invoice</span></div><div class="tw" style="border:0"><table class="t"><thead><tr><th>Bulan</th><th class="r">DPP penjualan</th><th class="r">PPN keluaran</th><th class="r">DPP pembelian</th><th class="r">PPN masukan</th><th class="r">Kurang (lebih) bayar</th></tr></thead><tbody>' +
+    r.map((e, i) => '<tr><td>' + BULAN[i] + '</td>' + sel(e.dppJual) + sel(e.keluar) + sel(e.dppBeli) + sel(e.masuk) + sel(e.selisih) + '</tr>').join('') +
+    '<tr class="tot-r"><td>Total</td>' + sel(T.dppJual) + sel(T.keluar) + sel(T.dppBeli) + sel(T.masuk) + sel(selisih) + '</tr></tbody></table></div>' +
+    '<p class="note" style="margin-top:10px">Angka kurang bayar positif berarti PPN keluaran lebih besar daripada PPN masukan. Ini rekap bantu dari invoice yang Anda catat, belum tentu sama dengan SPT Masa PPN. Faktur pajak resmi tetap dibuat di Coretax, dan PPN masukan hanya boleh dikreditkan bila faktur pajaknya sah serta memenuhi syarat. Periksa ke konsultan pajak atau KPP.</p></div>';
+}
+function invUmurHtml(semua) {
+  const blok = (jenis, judul) => {
+    const u = invUmur(semua, jenis), tot = INV_UMUR.reduce((s, k) => s + u[k[0]], 0);
+    const per = {};
+    semua.filter(i => i.jenis === jenis && i.sisa > 0.5).forEach(i => { const k = i.pihak || '(tanpa nama)'; const e = per[k] = per[k] || { n: 0, sisa: 0, telat: 0 }; e.n++; e.sisa += i.sisa; e.telat = Math.max(e.telat, i.telat); });
+    const pihak = Object.keys(per).sort((a, b) => per[b].sisa - per[a].sisa);
+    return '<div class="panel"><div class="panel-h"><h2>' + judul + '</h2><span class="sub">Per ' + tglFmt(hariIni()) + '</span></div>' +
+      '<dl class="kv">' + INV_UMUR.map(k => '<dt>' + k[1] + '</dt><dd class="n">' + (u[k[0]] > 0.5 ? angka(u[k[0]]) : '–') + '</dd>').join('') + '<dt><b>Total</b></dt><dd class="n"><b>' + angka(tot) + '</b></dd></dl>' +
+      (pihak.length ? '<div class="tw" style="margin-top:10px"><table class="t"><thead><tr><th>' + (jenis === 'jual' ? 'Pelanggan' : 'Pemasok') + '</th><th class="r">Invoice</th><th class="r">Sisa</th></tr></thead><tbody>' + pihak.map(p => '<tr><td>' + esc(p) + (per[p].telat > 0 ? ' <span class="chip warn">Lewat ' + per[p].telat + ' hari</span>' : '') + '</td><td class="n">' + per[p].n + '</td><td class="n">' + angka(per[p].sisa) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="note" style="margin-top:8px">Tidak ada yang belum dibayar.</p>') + '</div>';
+  };
+  return '<div class="cols c2">' + blok('jual', 'Umur piutang (invoice penjualan)') + blok('beli', 'Umur utang (invoice pembelian)') + '</div>';
+}
+
+/* ----- formulir invoice ----- */
+function invAkunOpsi(jenis, sel) {
+  const tipe = jenis === 'jual' ? ['pendapatan', 'pendapatan_lain'] : ['hpp', 'beban', 'beban_lain', 'aset_lancar', 'aset_tetap'];
+  const sistem = new Set(Object.keys(INV_AKUN).map(k => INV_AKUN[k][0]));
+  return optAkunGrup(a => !a.kas && tipe.indexOf(a.tipe) >= 0 && !sistem.has(a.kode), sel);
+}
+function invAkunDefault(jenis) {
+  if (jenis === 'jual') return (M.akun.find(a => a.tipe === 'pendapatan' && !a.normal) || {}).kode || '';
+  return (M.akun.find(a => a.tipe === 'hpp') || M.akun.find(a => a.tipe === 'beban') || {}).kode || '';
+}
+function invLabel(jenis) {
+  const j = jenis === 'jual';
+  return { pihak: j ? 'Pelanggan' : 'Pemasok', akun: j ? 'Akun pendapatan' : 'Akun biaya atau barang yang dibeli', ppn: j ? 'PPN keluaran (Rp)' : 'PPN masukan (Rp)', pph: j ? 'PPh 23 dipotong pelanggan, bila ada (Rp)' : 'PPh 23 yang Anda potong dari pemasok, bila ada (Rp)' };
+}
+function bukaInvoice(id, preset, meta) {
+  if (!Store.canWrite) { toast('Akses Anda hanya untuk melihat.', true); return; }
+  if (!(meta && meta.antrian)) INVQ = null;
+  const ada = id ? M.jrById[id] : null;
+  const v = ada ? Object.assign({ tgl: ada.tgl, ket: ada.ket }, ada.inv) : Object.assign({ jenis: 'jual', tgl: tglDefault(), no: '', pihak: '', tempo: '', ket: '', dpp: 0, ppn: 0, pph: 0, akun: '', ppnMode: 'tanpa' }, preset || {});
+  if (!v.akun || !M.am[v.akun]) v.akun = invAkunDefault(v.jenis);
+  if (ada) v.ppnMode = invBulat(v.ppn) <= 0 ? 'tanpa' : Math.abs(v.ppn - v.dpp * 0.11) <= 1 ? '11' : Math.abs(v.ppn - v.dpp * 0.12) <= 1 ? '12' : 'sendiri';
+  INV = { id: ada ? ada.id : null, jenis: v.jenis, meta: meta || null };
+  const L = invLabel(v.jenis), kurang = (meta && meta.hilang) || [];
+  const mk = (k, lb, inner) => '<div class="fld"><label class="lbl" for="inv-' + k + '">' + lb + '</label>' + inner + '</div>';
+  const kc = k => (kurang.indexOf(k) >= 0 ? ' inv-kurang' : '');
+  const pihakLama = Array.from(new Set(invSemua(M, hariIni()).filter(i => i.pihak).map(i => i.pihak)));
+  const seg = ['jual', 'beli'].map(j => '<button type="button" data-act="invJenis" data-j="' + j + '" aria-pressed="' + (v.jenis === j) + '">' + (j === 'jual' ? 'Penjualan' : 'Pembelian') + '</button>').join('');
+  const dupl = !ada && v.no && invSemua(M, hariIni()).find(i => i.jenis === v.jenis && i.no && i.no.toLowerCase() === String(v.no).toLowerCase() && i.pihak.toLowerCase() === String(v.pihak || '').toLowerCase());
+  let banner = '';
+  if (meta && meta.antrian) {
+    banner = '<div class="banner info"><div><b>Dibaca dari PDF: ' + esc(meta.nama) + '</b> (' + meta.no + ' dari ' + meta.n + '). Periksa tiap isian dengan invoice aslinya sebelum menyimpan; format invoice tiap perusahaan berbeda sehingga bacaan bisa meleset.' +
+      (kurang.length ? ' Isian bertanda merah belum terbaca.' : '') + (meta.catatan && meta.catatan.length ? '<ul style="margin:6px 0 0 18px;padding:0">' + meta.catatan.map(c => '<li>' + esc(c) + '</li>').join('') + '</ul>' : '') + '</div></div>';
+  }
+  if (dupl) banner += '<div class="banner"><div><b>Invoice ini tampaknya sudah tercatat</b> (' + tglFmt(dupl.tgl) + '). Menyimpan lagi akan ditolak; pilih Lewati atau ubah nomornya.</div></div>';
+  const bayar = ada ? M.txAll.filter(t => t.inv === ada.id) : [];
+  const isi = banner + '<div class="seg" role="group" aria-label="Jenis invoice" id="inv-seg">' + seg + '</div>' +
+    '<div class="grid2">' +
+    mk('tgl', 'Tanggal invoice', '<input class="in' + kc('tgl') + '" id="inv-tgl" type="date" value="' + esc(v.tgl) + '">') +
+    mk('no', 'Nomor invoice', '<input class="in' + kc('no') + '" id="inv-no" value="' + esc(v.no || '') + '" placeholder="mis. INV-2610-01" autocomplete="off">') +
+    '<div class="fld span2"><label class="lbl" for="inv-pihak" id="lb-inv-pihak">' + L.pihak + '</label><input class="in' + kc('pihak') + '" id="inv-pihak" list="inv-pihak-list" value="' + esc(v.pihak || '') + '" placeholder="Nama perusahaan atau orang" autocomplete="off" data-act-change="invPihak"><datalist id="inv-pihak-list">' + pihakLama.map(p => '<option value="' + esc(p) + '">').join('') + '</datalist></div>' +
+    mk('tempo', 'Jatuh tempo <span class="muted">(opsional)</span>', '<input class="in" id="inv-tempo" type="date" value="' + esc(v.tempo || '') + '">') +
+    mk('akun', L.akun, '<select class="in" id="inv-akun">' + invAkunOpsi(v.jenis, v.akun) + '</select>') +
+    '<div class="fld span2"><label class="lbl" for="inv-ket">Keterangan <span class="muted">(opsional)</span></label><input class="in" id="inv-ket" value="' + esc(v.ket && !/^Invoice (penjualan|pembelian)/.test(v.ket) ? v.ket : '') + '" placeholder="mis. Jasa instalasi jaringan kantor" autocomplete="off"></div>' +
+    mk('dpp', 'Jumlah sebelum PPN / DPP (Rp)', '<input class="in num-in uang' + kc('dpp') + '" id="inv-dpp" data-inv="dpp" inputmode="numeric" value="' + invUang(v.dpp) + '" placeholder="0" autocomplete="off">') +
+    mk('ppnmode', 'PPN', '<select class="in" id="inv-ppnmode" data-act-change="invMode">' + opt('tanpa', 'Tanpa PPN', v.ppnMode) + opt('11', 'PPN 11% dari DPP', v.ppnMode) + opt('12', 'PPN 12% dari DPP', v.ppnMode) + opt('sendiri', 'Isi sendiri', v.ppnMode) + '</select>') +
+    mk('ppn', '<span id="lb-inv-ppn">' + L.ppn + '</span>', '<input class="in num-in uang" id="inv-ppn" data-inv="ppn" inputmode="numeric" value="' + invUang(v.ppn) + '" placeholder="0" autocomplete="off">') +
+    mk('pph', '<span id="lb-inv-pph">' + L.pph + '</span>', '<input class="in num-in uang" id="inv-pph" data-inv="pph" inputmode="numeric" value="' + invUang(v.pph) + '" placeholder="0" autocomplete="off">') +
+    '</div><div class="sum" id="inv-sum" style="margin:0"></div>' +
+    (bayar.length ? '<p class="note" style="margin-top:8px"><b>Pembayaran tercatat:</b> ' + bayar.map(t => tglFmt(t.tgl) + ' ' + rp(t.jml)).join(' · ') + '. Ubah atau hapus pembayaran lewat menu Kas &amp; Bank.</p>' : '') +
+    '<p class="note" style="margin-top:8px">Saat disimpan, aplikasi membuat jurnal otomatis (' + (v.jenis === 'jual' ? 'piutang, pendapatan, dan PPN keluaran' : 'biaya, PPN masukan, dan utang') + '). Faktur pajak resmi tetap dibuat di Coretax.</p>' +
+    '<div class="hint neg" id="inv-err" role="alert"></div>';
+  const tombol = (ada ? '<button class="btn bahaya" data-act="hapusInv">Hapus</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button>' +
+    (meta && meta.antrian ? '<button class="btn" data-act="invLewati">Lewati</button>' : '') + '<button class="btn pri" data-act="simpanInv">' + (meta && meta.antrian && meta.no < meta.n ? 'Simpan dan lanjut' : 'Simpan') + '</button>';
+  bukaModal({ judul: ada ? 'Ubah invoice' : 'Invoice', lebar: true, tanpaFokus: true, isi, tombol });
+  invHitungLive('muat');
+}
+function invBaca() {
+  return { jenis: INV.jenis, no: $('#inv-no').value.trim(), pihak: $('#inv-pihak').value.trim(), tempo: $('#inv-tempo').value || '', akun: $('#inv-akun').value, dpp: bacaUang($('#inv-dpp')), ppn: Math.abs(bacaUang($('#inv-ppn'))), pph: Math.abs(bacaUang($('#inv-pph'))) };
+}
+function invHitungLive(src) {
+  const dpp = bacaUang($('#inv-dpp')), mode = $('#inv-ppnmode').value;
+  if (src === 'ppn' && mode !== 'sendiri') $('#inv-ppnmode').value = 'sendiri';
+  else if (src !== 'ppn' && src !== 'pph' && src !== 'muat') {
+    if (INV_PPN[mode]) $('#inv-ppn').value = invUang(dpp * INV_PPN[mode]);
+    else if (mode === 'tanpa') $('#inv-ppn').value = '';
+  }
+  const v = invBaca(), tot = v.dpp + v.ppn, bersih = tot - v.pph, j = v.jenis === 'jual';
+  const sum = $('#inv-sum');
+  if (sum) sum.innerHTML = '<span>Total invoice (DPP + PPN) <b>' + rp(tot) + '</b></span>' + (v.pph > 0 ? '<span>PPh dipotong <b>' + rp(v.pph) + '</b></span>' : '') +
+    '<span>' + (j ? 'Diterima bersih' : 'Dibayar bersih') + ' <b>' + rp(bersih) + '</b></span>';
+}
+function invIsiJenis(jenis) {
+  INV.jenis = jenis;
+  const L = invLabel(jenis), sel = $('#inv-akun');
+  const tetap = invAkunOpsi(jenis, '').indexOf('value="' + sel.value + '"') >= 0;
+  sel.innerHTML = invAkunOpsi(jenis, tetap ? sel.value : invAkunDefault(jenis));
+  $('#lb-inv-pihak').textContent = L.pihak; $('#lb-inv-ppn').textContent = L.ppn; $('#lb-inv-pph').textContent = L.pph;
+  const lbAkun = document.querySelector('label[for="inv-akun"]'); if (lbAkun) lbAkun.textContent = L.akun;
+  $('#inv-seg').querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.j === jenis)));
+  invHitungLive('muat');
+}
+function simpanInvoice() {
+  const err = $('#inv-err'), v = invBaca(), tgl = $('#inv-tgl').value, ket = $('#inv-ket').value.trim();
+  err.textContent = '';
+  if (!tglValid(tgl)) { err.textContent = 'Isi tanggal invoice dengan benar.'; return; }
+  if (!v.pihak) { err.textContent = 'Isi nama ' + invLabel(v.jenis).pihak.toLowerCase() + '.'; $('#inv-pihak').focus(); return; }
+  if (!(v.dpp > 0)) { err.textContent = 'Jumlah sebelum PPN harus lebih dari nol.'; $('#inv-dpp').focus(); return; }
+  if (!v.akun || !M.am[v.akun]) { err.textContent = 'Pilih akun.'; return; }
+  if (v.pph > v.dpp + v.ppn) { err.textContent = 'PPh yang dipotong tidak boleh melebihi total invoice.'; return; }
+  if (v.tempo && !tglValid(v.tempo)) { err.textContent = 'Jatuh tempo tidak valid.'; return; }
+  if (v.tempo && v.tempo < tgl) { err.textContent = 'Jatuh tempo tidak boleh sebelum tanggal invoice.'; return; }
+  const dup = v.no && invSemua(M, hariIni()).find(i => i.id !== INV.id && i.jenis === v.jenis && i.no.toLowerCase() === v.no.toLowerCase() && i.pihak.toLowerCase() === v.pihak.toLowerCase());
+  if (dup) { err.textContent = 'Invoice dengan nomor dan ' + invLabel(v.jenis).pihak.toLowerCase() + ' yang sama sudah tercatat (' + tglFmt(dup.tgl) + ').'; return; }
+  const kurang = invAkunKurang(v, M.am);
+  if (kurang.length && !Store.ubahConfig(c => { kurang.forEach(a => { if (!c.akun.some(x => x.kode === a[0])) c.akun.push({ kode: a[0], nama: a[1], tipe: a[2] }); }); }, true)) return;
+  const jr = { id: INV.id || uid(), tgl, ket: ket || 'Invoice ' + (v.jenis === 'jual' ? 'penjualan ' : 'pembelian ') + (v.no ? v.no + ' · ' : '') + v.pihak, ref: v.no, baris: invBaris(v), inv: v };
+  if (!Store.simpanJr(jr)) return;
+  const th = +tgl.slice(0, 4); if (th !== UI.tahun) UI.tahun = th;
+  const q = INVQ;
+  if (q) { q.ok++; invLanjutAntrian(); return; }
+  toast(INV.id ? 'Invoice diperbarui.' : 'Invoice disimpan.'); tutupModal();
+}
+function invLanjutAntrian() {
+  const q = INVQ; q.i++;
+  if (q.i < q.daftar.length) { invBukaAntrian(); return; }
+  INVQ = null; tutupModal();
+  toast(q.ok + ' invoice disimpan' + (q.lewati ? ', ' + q.lewati + ' dilewati' : '') + (q.gagal.length ? ', ' + q.gagal.length + ' PDF tidak terbaca' : '') + '.', q.gagal.length > 0);
+}
+function invBukaAntrian() {
+  const q = INVQ, it = q.daftar[q.i], h = it.hasil;
+  bukaInvoice(null, { jenis: h.jenis, tgl: h.tgl, no: h.no, pihak: h.pihak, tempo: h.tempo, ket: h.ket, dpp: h.dpp, ppn: h.ppn, pph: h.pph, ppnMode: h.ppnMode },
+    { antrian: true, nama: it.nama, no: q.i + 1, n: q.daftar.length, hilang: h.hilang, catatan: h.catatan });
+}
+
+/* ----- pembayaran ----- */
+function bukaBayarInv(id) {
+  if (!Store.canWrite) { toast('Akses Anda hanya untuk melihat.', true); return; }
+  const i = invSemua(M, hariIni()).find(x => x.id === id);
+  if (!i) return;
+  INV = { id, jenis: i.jenis, bayar: true, sisa: i.sisa };
+  const j = i.jenis === 'jual', kasDef = UI.kas.rek || (M.kasAkun.find(a => /bank/i.test(a.nama)) || M.kasAkun[0] || {}).kode || '';
+  bukaModal({
+    judul: j ? 'Terima pembayaran' : 'Bayar invoice', tanpaFokus: true,
+    isi: '<p class="note" style="margin-bottom:10px"><b>' + esc(i.pihak) + '</b>' + (i.no ? ' · ' + esc(i.no) : '') + '<br>Sisa tagihan <b>' + rp(i.sisa) + '</b></p><div class="grid2">' +
+      '<div class="fld"><label class="lbl" for="by-tgl">Tanggal</label><input class="in" id="by-tgl" type="date" value="' + esc(tglDefault()) + '"></div>' +
+      '<div class="fld"><label class="lbl" for="by-akun">' + (j ? 'Masuk ke rekening' : 'Dibayar dari rekening') + '</label><select class="in" id="by-akun">' + M.kasAkun.map(a => opt(a.kode, a.nama, kasDef)).join('') + '</select></div>' +
+      '<div class="fld"><label class="lbl" for="by-jml">Jumlah (Rp)</label><input class="in num-in uang" id="by-jml" inputmode="numeric" value="' + invUang(i.sisa) + '" autocomplete="off"></div>' +
+      '<div class="fld span2"><label class="lbl" for="by-ket">Keterangan</label><input class="in" id="by-ket" value="' + esc((j ? 'Pelunasan ' : 'Pembayaran ') + (i.no ? i.no + ' ' : '') + i.pihak) + '" autocomplete="off"></div></div>' +
+      '<p class="note" style="margin-top:8px">Dicatat sebagai transaksi ' + (j ? 'uang masuk' : 'uang keluar') + ' di Kas &amp; Bank, dan mengurangi ' + (j ? 'piutang' : 'utang') + '. Bila pembayaran sudah masuk lewat impor mutasi bank, tidak perlu dicatat lagi di sini.</p><div class="hint neg" id="by-err" role="alert"></div>',
+    tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="simpanBayarInv">Catat pembayaran</button>',
+  });
+  setTimeout(() => { const e = $('#by-jml'); if (e) e.select(); }, 40);
+}
+function simpanBayarInv() {
+  const err = $('#by-err'), tgl = $('#by-tgl').value, akun = $('#by-akun').value, jml = bacaUang($('#by-jml')), ket = $('#by-ket').value.trim();
+  const i = invSemua(M, hariIni()).find(x => x.id === INV.id);
+  if (!i) { tutupModal(); return; }
+  if (!tglValid(tgl)) { err.textContent = 'Isi tanggal dengan benar.'; return; }
+  if (!(jml > 0)) { err.textContent = 'Jumlah harus lebih dari nol.'; return; }
+  if (jml > i.sisa + 0.5) { err.textContent = 'Jumlah melebihi sisa tagihan (' + rp(i.sisa) + ').'; return; }
+  const j = i.jenis === 'jual';
+  if (!Store.simpanTx({ id: uid(), tgl, jenis: j ? 'masuk' : 'keluar', akun, lawan: j ? INV_AKUN.piutang[0] : INV_AKUN.utang[0], ket, jml, ref: i.no, inv: i.id })) return;
+  const th = +tgl.slice(0, 4); if (th !== UI.tahun) UI.tahun = th;
+  toast('Pembayaran ' + rp(jml) + ' dicatat.'); tutupModal();
+}
+
+/* ----- baca PDF ----- */
+function bukaInvPdf() {
+  if (!Store.canWrite) { toast('Akses Anda hanya untuk melihat.', true); return; }
+  bukaModal({
+    judul: 'Baca invoice dari PDF', tanpaFokus: true,
+    isi: '<div class="fld"><label class="lbl" for="ip-jenis">Jenis invoice</label><select class="in" id="ip-jenis"><option value="jual">Penjualan (tagihan ke pelanggan)</option><option value="beli">Pembelian (tagihan dari pemasok)</option></select></div>' +
+      '<div class="fld"><label class="lbl" for="ip-file">Berkas PDF (boleh lebih dari satu)</label><input class="in" id="ip-file" type="file" multiple accept=".pdf,application/pdf" data-act-change="invPdfFile" style="padding-top:5px">' +
+      '<div class="hint">Hasil bacaan tampil dulu di formulir dan belum tersimpan sampai Anda menekan Simpan. PDF harus berupa invoice berisi teks (dari aplikasi invoice atau akuntansi), bukan foto atau hasil scan. Format tiap perusahaan berbeda, jadi cocokkan nomor, tanggal, dan angkanya dengan invoice asli.</div></div>' +
+      '<div class="hint neg" id="ip-err" role="alert"></div>',
+    tombol: '<button class="btn" data-act="tutupModal">Tutup</button>',
+  });
+}
+async function invProsesPdf(files) {
+  const jenis = $('#ip-jenis').value, err = $('#ip-err'), q = [];
+  for (const f of files) {
+    err.className = 'hint'; err.textContent = 'Membaca ' + f.name + '…';
+    try { q.push({ nama: f.name, hasil: invParse(await invBacaPdf(f), jenis, hariIni()) }); }
+    catch (e) { q.push({ nama: f.name, galat: (e && e.message) || 'Tidak bisa dibaca.' }); }
+  }
+  const baik = q.filter(x => x.hasil);
+  if (!baik.length) { err.className = 'hint neg'; err.textContent = q.map(x => x.nama + ': ' + x.galat).join(' '); return; }
+  INVQ = { daftar: baik, i: 0, ok: 0, lewati: 0, gagal: q.filter(x => x.galat) };
+  tutupModal(); invBukaAntrian();
+}
+
+/* ----- Excel ----- */
+function unduhInvoice() {
+  if (!pastikanXlsx()) return;
+  const th = UI.tahun, semua = invSemua(M, hariIni()), wb = XLSX.utils.book_new(), add = (ws, n) => XLSX.utils.book_append_sheet(wb, ws, n);
+  const sttTeks = i => (i.lunas ? 'Lunas' : i.telat > 0 ? 'Lewat jatuh tempo ' + i.telat + ' hari' : i.status === 'sebagian' ? 'Dibayar sebagian' : 'Belum dibayar');
+  const baris = semua.slice().sort((a, b) => (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : 0)).map(i => [i.tgl, invJenisTeks(i.jenis), i.no, i.pihak, i.tempo, i.dpp, i.ppn, i.pph, i.bersih, i.dibayar, i.sisa, sttTeks(i)]);
+  add(sheetTabel('Daftar invoice', 'Per ' + tglPanjang(hariIni()), ['Tanggal', 'Jenis', 'Nomor', 'Pihak', 'Jatuh tempo', 'DPP', 'PPN', 'PPh dipotong', 'Tagihan bersih', 'Dibayar', 'Sisa', 'Status'], baris, [null, null, null, null, null, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, null], [12, 12, 20, 30, 12, 16, 14, 14, 16, 16, 16, 24]), 'Daftar Invoice');
+  const r = invRekapPpn(semua, th);
+  add(sheetTabel('Rekap PPN dari invoice', 'Tahun ' + th, ['Bulan', 'DPP penjualan', 'PPN keluaran', 'DPP pembelian', 'PPN masukan', 'Kurang (lebih) bayar'], r.map((e, i) => [BULAN[i], e.dppJual, e.keluar, e.dppBeli, e.masuk, e.selisih]), [null, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA], [14, 18, 18, 18, 18, 22]), 'Rekap PPN');
+  simpanBerkas('invoice-' + th + '-' + slug(M.cfg.perusahaan.nama) + '.xlsx', XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
+}
+
+const ACT_INV = {
+  invBaru() { bukaInvoice(null); },
+  invPdf() { bukaInvPdf(); },
+  invEdit(el) { bukaInvoice(el.dataset.id); },
+  invBayar(el) { bukaBayarInv(el.dataset.id); },
+  invJenis(el) { invIsiJenis(el.dataset.j); },
+  simpanInv() { simpanInvoice(); },
+  simpanBayarInv() { simpanBayarInv(); },
+  hapusInv(el) { two(el, () => { const n = M.txAll.filter(t => t.inv === INV.id).length; if (Store.hapusJr(INV.id)) toast('Invoice dihapus.' + (n ? ' ' + n + ' pembayarannya tetap ada di Kas & Bank.' : '')); tutupModal(); }); },
+  invLewati() { if (!INVQ) { tutupModal(); return; } INVQ.lewati++; invLanjutAntrian(); },
+  invUnduh() { unduhInvoice(); },
+  tabInv(el) { UI.invoice.tab = el.dataset.t; render(); },
+};
+const ACTC_INV = {
+  invMode() { invHitungLive('mode'); },
+  invPihak(el) {
+    const nama = el.value.trim().toLowerCase(); if (!nama || !INV) return;
+    const lama = invSemua(M, hariIni()).find(i => i.jenis === INV.jenis && i.pihak.toLowerCase() === nama);
+    if (lama && lama.akun && M.am[lama.akun] && !(INV.meta && INV.meta.antrian)) $('#inv-akun').value = lama.akun;
+  },
+  invPdfFile(el) { const fs = Array.from(el.files || []); el.value = ''; if (fs.length) invProsesPdf(fs); },
+};
 
 /* ===== export.js ===== */
 /* ================= Ekspor: Excel (SheetJS) & PDF (jsPDF) ================= */
@@ -3896,6 +4451,7 @@ const ACT = {
     const pilih = IMP.rows.filter(r => r.pakai);
     if (!pilih.length) { toast('Pilih minimal satu baris.', true); return; }
     const list = pilih.map((r, i) => ({ id: uid() + i.toString(36), tgl: r.tgl, jenis: r.jenis, akun: IMP.akun, lawan: r.lawan, ket: r.ket, jml: r.jml, ref: '' }));
+    pilih.forEach((r, i) => { if (r.inv && (r.lawan === INV_AKUN.piutang[0] || r.lawan === INV_AKUN.utang[0])) list[i].inv = r.inv; });
     if (!Store.simpanTxBanyak(list)) return;
     const th = Math.max.apply(null, list.map(t => +t.tgl.slice(0, 4)));
     UI.tahun = th; UI.page = 'kas-bank'; UI.kas.rek = IMP.akun;
@@ -3903,7 +4459,7 @@ const ACT = {
   },
 
   tambahJr() { bukaJr(null); },
-  editJr(el) { bukaJr(el.dataset.id); },
+  editJr(el) { const j = M.jrById[el.dataset.id]; if (j && j.inv) bukaInvoice(j.id); else bukaJr(el.dataset.id); },
   jrTemplate(el) {
     const t = TEMPLATE_JR[+el.dataset.i]; bacaBarisJr();
     JR.baris[0].akun = M.am[t[1]] ? t[1] : ''; JR.baris[1].akun = M.am[t[2]] ? t[2] : '';
@@ -3986,7 +4542,7 @@ const ACT = {
   unduhExcel() { unduhExcel(); },
   unduhPdf() { unduhPdf(); },
 };
-Object.assign(ACT, ACT_SYNC, ACT_SPT);
+Object.assign(ACT, ACT_SYNC, ACT_SPT, ACT_INV);
 const ACTC = {
   txAkun() { if (TX && TX.jenis === 'transfer') isiLawan('transfer', $('#f-lawan').value); },
   simpanTeks(el) {
@@ -3996,7 +4552,7 @@ const ACTC = {
   },
 };
 
-Object.assign(ACTC, ACTC_SYNC, ACTC_SPT);
+Object.assign(ACTC, ACTC_SYNC, ACTC_SPT, ACTC_INV);
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
@@ -4009,7 +4565,11 @@ document.addEventListener('change', e => {
   if (t.dataset.ui) { setUiPath(t.dataset.ui, t.dataset.num ? +t.value : t.value); render(); return; }
   if (t.dataset.actChange && ACTC[t.dataset.actChange]) { ACTC[t.dataset.actChange](t); return; }
   if (t.dataset.imp === 'pakai') { IMP.rows[+t.dataset.i].pakai = t.checked; ubahTxJumlahImpor(); return; }
-  if (t.dataset.imp === 'lawan') { IMP.rows[+t.dataset.i].lawan = t.value; return; }
+  if (t.dataset.imp === 'lawan') {
+    const r = IMP.rows[+t.dataset.i]; r.lawan = t.value;
+    if (r.inv && t.value !== (r.jenis === 'masuk' ? INV_AKUN.piutang[0] : INV_AKUN.utang[0])) { delete r.inv; const ch = document.getElementById('imp-chip-' + t.dataset.i); if (ch) ch.remove(); }   // akun diganti: tidak lagi pelunasan invoice
+    return;
+  }
   if (t.dataset.jr === 'akun') { totalJr(); return; }
   if (t.id === 'imp-file' && t.files && t.files[0]) { const f = t.files[0]; t.value = ''; impBacaBerkas(f); return; }
   if (t.id === 'pulih-file' && t.files && t.files[0]) {
@@ -4034,6 +4594,7 @@ document.addEventListener('input', e => {
     let c = 0, i = 0; for (; i < t.value.length && c < sebelum; i++) if (/\d/.test(t.value[i])) c++;
     try { t.setSelectionRange(i, i); } catch (er) { /* abaikan */ }
     if (t.dataset.jr) totalJr();
+    if (t.dataset.inv) invHitungLive(t.dataset.inv);
     if (t.dataset.sa) hitungSaldoAwal();
     return;
   }
@@ -4049,6 +4610,8 @@ document.addEventListener('keydown', e => {
   if (t.tagName === 'INPUT' && t.type !== 'checkbox' && t.type !== 'file' && $('#modal').contains(t)) {
     if ($('#f-jml') && TX) { e.preventDefault(); simpanTx(false); }
     else if ($('#jr-tgl') && JR && t.id !== 'imp-teks') { e.preventDefault(); simpanJr(); }
+    else if ($('#inv-tgl') && INV && t.id !== 'inv-pihak') { e.preventDefault(); simpanInvoice(); }
+    else if ($('#by-jml') && INV && INV.bayar) { e.preventDefault(); simpanBayarInv(); }
     else if ($('#ak-kode')) { e.preventDefault(); const b = $('.md-f .btn.pri'); if (b) b.click(); }
   }
 });
