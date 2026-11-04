@@ -446,6 +446,21 @@ select.in { padding-right: 6px; }
 .spt-cek .sk-box { flex: none; width: 16px; height: 16px; margin-top: 1px; border: 1.5px solid var(--ink-3); border-radius: 4px; }
 .spt-cek svg { flex: none; color: var(--accent); margin-top: 1px; }
 
+.nav .baru { font-style: normal; font-size: 10px; font-weight: 600; line-height: 1; padding: 3px 6px; margin-left: 6px; border-radius: 99px; background: var(--accent); color: #fff; letter-spacing: .02em; }
+
+.spt-sar { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; background: var(--bg-soft, transparent); }
+.spt-sar h3 { font-size: 14px; margin: 0 0 6px; }
+.spt-sar-g { border-top: 1px solid var(--line); padding: 8px 0; }
+.spt-sar-g:first-of-type { border-top: 0; }
+.spt-sar-g summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; font-weight: 500; }
+.spt-sar-g summary small { color: var(--ink-3); font-weight: 400; }
+.spt-sar-i { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; border-top: 1px dashed var(--line); cursor: pointer; }
+.spt-sar-i input { flex: none; margin-top: 3px; width: 18px; height: 18px; }
+.spt-sar-t { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.spt-sar-k { overflow-wrap: anywhere; }
+.spt-sar-t small { color: var(--ink-3); font-size: 12px; }
+.spt-sar-i .n { flex: none; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 </style>
 </head>
 <body>
@@ -1759,6 +1774,11 @@ const PAGES = [
   { sep: 1 },
   { id: 'pengaturan', t: 'Pengaturan', ic: 'setelan' },
 ];
+const APP_VERSI = 'f59adfe50b';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
+const versiNyata = () => APP_VERSI.charAt(0) !== '_';
+const sptDilihat = () => { try { return localStorage.getItem('pembukuan.spt.dilihat') === '1'; } catch (e) { return true; } };
+const sptTandaiDilihat = () => { try { localStorage.setItem('pembukuan.spt.dilihat', '1'); } catch (e) { /* abaikan */ } };
+const sptSudahDigeser = () => { try { return localStorage.getItem('pembukuan.spt.geser') === '1'; } catch (e) { return true; } };
 const UI = {
   page: 'ringkasan', tahun: new Date().getFullYear(), tahunSet: false,
   kas: { rek: '', bln: '', jenis: '', q: '', lim: 100 },
@@ -1832,7 +1852,7 @@ const modalTerbuka = () => !!$('#modal').firstChild;
 /* ----- penggambaran ----- */
 function kerangka(isi) {
   const nav = PAGES.map(p => (p.sep ? '<div class="nav-sep"></div>' :
-    '<button data-act="nav" data-id="' + p.id + '"' + (UI.page === p.id ? ' aria-current="page"' : '') + '>' + IC[p.ic] + '<span>' + p.t + '</span></button>')).join('');
+    '<button data-act="nav" data-id="' + p.id + '"' + (UI.page === p.id ? ' aria-current="page"' : '') + '>' + IC[p.ic] + '<span>' + p.t + '</span>' + (p.id === 'spt' && !sptDilihat() ? '<i class="baru">Baru</i>' : '') + '</button>')).join('');
   const mode = Store.mode;
   const status = mode === 'db' ? '<span class="status"><span class="dot"></span>Tersimpan otomatis</span><br>Data aman walau halaman ditutup.' :
     mode === 'local' ? '<span class="status"><span class="dot warn"></span>Tersimpan di browser ini</span><br>Unduh cadangan secara berkala di Pengaturan.' :
@@ -1870,6 +1890,13 @@ function render() {
   if (!views[UI.page]) UI.page = 'ringkasan';
   app.innerHTML = kerangka(bannerDemo() + views[UI.page]());
   setelahRender.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
+  if (UI.page === 'spt') { sptTandaiDilihat(); const bd = $('.nav .baru'); if (bd) bd.remove(); }
+  else if (!sptDilihat() && !sptSudahDigeser()) {   // di HP menu atas bisa digeser: sekali saja, geser ke "SPT Tahunan" agar terlihat ada menu baru
+    try {
+      const nv = $('.nav'), b = nv && nv.querySelector('[data-id="spt"]');
+      if (b && nv.scrollWidth > nv.clientWidth + 4) { nv.scrollLeft = Math.max(0, b.offsetLeft - (nv.clientWidth - b.offsetWidth) / 2); localStorage.setItem('pembukuan.spt.geser', '1'); }
+    } catch (e) { /* abaikan */ }
+  }
   if (fokus) {
     const el = document.getElementById(fokus.id);
     if (el) { el.focus(); if (fokus.v != null && el.value !== fokus.v) el.value = fokus.v; try { if (fokus.a != null) el.setSelectionRange(fokus.a, fokus.b); } catch (e) { /* tipe tanpa seleksi */ } }
@@ -3013,7 +3040,7 @@ function vTahunan() {
   const nama = (p.bentuk ? p.bentuk + ' ' : '') + p.nama;
   const adaData = M.adaDataTahun(th);
   let h = kepala('Laporan Tahunan', 'Laporan keuangan lengkap tahun buku ' + th + ', siap diunduh sebagai PDF atau Excel.',
-    '<button class="btn" data-act="unduhExcel">' + IC.unduh + ' Excel lengkap</button><button class="btn pri" data-act="unduhPdf"' + (UI.pdfBusy ? ' disabled' : '') + '>' + IC.unduh + ' ' + (UI.pdfBusy ? 'Menyusun PDF…' : 'Unduh PDF') + '</button>');
+    '<button class="btn" data-act="nav" data-id="spt">SPT Tahunan</button><button class="btn" data-act="unduhExcel">' + IC.unduh + ' Excel lengkap</button><button class="btn pri" data-act="unduhPdf"' + (UI.pdfBusy ? ' disabled' : '') + '>' + IC.unduh + ' ' + (UI.pdfBusy ? 'Menyusun PDF…' : 'Unduh PDF') + '</button>');
   if (AL.parsial) h += '<div class="banner info"><div><b>Tahun ' + th + ' belum berakhir.</b> Laporan memuat data sampai ' + tglAkhirYm(AL.b) + ' dan dibandingkan dengan periode yang sama tahun ' + (th - 1) + '.</div></div>';
   if (!adaData) h += '<div class="banner"><div><b>Belum ada transaksi di tahun ' + th + '.</b> Laporan di bawah masih kosong. Pilih tahun lain di pojok kanan atas atau catat transaksi.</div></div>';
   h += '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>Teks laporan</h2><span class="sub">Tersimpan otomatis dan ikut dicetak di PDF</span></div><div class="row2">' +
@@ -3143,6 +3170,7 @@ function vData() {
   return '<div class="cols ce" style="max-width:980px">' + vSinkron() + '<div class="panel"><div class="panel-h"><h2>Penyimpanan</h2></div><dl class="kv"><dt>Transaksi kas &amp; bank</dt><dd>' + fmtN.format(nTx) + '</dd><dt>Jurnal manual</dt><dd>' + fmtN.format(nJr) + '</dd><dt>Bulan berisi data</dt><dd>' + nBln + '</dd><dt>Akun</dt><dd>' + M.akun.length + '</dd><dt>Status</dt><dd>' + sim + '</dd></dl></div>' +
     '<div class="panel"><div class="panel-h"><h2>Cadangan</h2></div><p class="note" style="margin-bottom:12px">Cadangan berisi semua profil, akun, saldo awal, dan transaksi dalam satu berkas JSON.</p><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" data-act="unduhCadangan">' + IC.unduh + ' Unduh cadangan</button><label class="btn" for="pulih-file" style="cursor:pointer">Pulihkan dari berkas…</label><input id="pulih-file" type="file" accept=".json,application/json" class="sr"></div></div>' +
     '<div class="panel"><div class="panel-h"><h2>Impor transaksi</h2></div><p class="note" style="margin-bottom:12px">Unggah mutasi rekening dari internet banking atau e-statement (PDF, Excel, atau CSV). Kategori akun diisi otomatis dari aturan.</p><button class="btn" data-act="bukaImpor">Impor mutasi bank</button></div>' +
+    (versiNyata() ? '<div class="panel"><div class="panel-h"><h2>Versi aplikasi</h2></div><dl class="kv"><dt>Versi terpasang</dt><dd><code>' + esc(APP_VERSI) + '</code></dd></dl><p class="note" style="margin:10px 0 12px">Bila fitur baru belum muncul setelah Anda mengunggah versi baru, tekan tombol ini. Data pembukuan tidak terhapus; hanya salinan aplikasi di perangkat yang diganti.</p><button class="btn" data-act="muatTerbaru">Muat versi terbaru</button></div>' : '') +
     '<div class="panel"><div class="panel-h"><h2>Mulai ulang</h2></div><p class="note" style="margin-bottom:12px">' + (M.cfg.demo ? 'Saat ini memakai data contoh.' : 'Tindakan ini menghapus seluruh data pembukuan.') + '</p><div style="display:flex;gap:8px;flex-wrap:wrap">' +
     (M.cfg.demo ? '<button class="btn pri" data-act="mulaiSendiri">Hapus data contoh, mulai dengan data saya</button>' : '<button class="btn" data-act="muatContohKonfirm">Ganti dengan data contoh</button><button class="btn bahaya" data-act="hapusSemua">Hapus semua data</button>') + '</div></div></div>';
 }
@@ -3156,12 +3184,56 @@ const SPT_PRESET = {
   pos: ['Sumbangan, jamuan, atau representasi tanpa daftar nominatif', 'Biaya pribadi pemilik atau pengurus', 'Denda dan bunga pajak', 'Imbalan natura atau kenikmatan yang tidak boleh dibiayakan', 'Selisih penyusutan komersial dan fiskal'],
   neg: ['Penghasilan yang sudah dikenai PPh final (mis. bunga bank)', 'Penghasilan bukan objek pajak', 'Selisih penyusutan fiskal dan komersial'],
 };
-const sptKosong = () => ({ pos: [], neg: [], rugi: [], tarif: 'normal', bruto: null, kredit: { p22: 0, p23: 0, p24: 0, p25: 0 }, finalSetor: 0 });
+const sptKosong = () => ({ pos: [], neg: [], rugi: [], tarif: 'normal', bruto: null, kredit: { p22: 0, p23: 0, p24: 0, p25: 0 }, finalSetor: 0, ditolak: [] });
 function sptGabung(inp) {
   const o = Object.assign(sptKosong(), inp || {});
   o.kredit = Object.assign({ p22: 0, p23: 0, p24: 0, p25: 0 }, (inp && inp.kredit) || {});
-  ['pos', 'neg', 'rugi'].forEach(k => { if (!Array.isArray(o[k])) o[k] = []; });
+  ['pos', 'neg', 'rugi', 'ditolak'].forEach(k => { if (!Array.isArray(o[k])) o[k] = []; });
   return o;
+}
+
+/* ----- Saran otomatis dari transaksi -----
+   Dibaca dari uraian transaksi dan nama akun, jadi hanya usulan: pengguna yang memutuskan.
+   cocok() mengembalikan 'pasti', 'periksa' (perlu dicek dulu, tidak dicentang), atau null. */
+const RE_PAJAK_KATA = /\b(pajak|djp|pph|ppn|pbb|stp)\b/i;
+const SPT_SARAN = [
+  { kat: 'denda', label: 'Denda, sanksi, dan bunga pajak',
+    catatan: 'Denda dan sanksi pajak tidak boleh dikurangkan. Denda lain (misalnya keterlambatan ke pemasok) umumnya boleh, jadi yang tidak jelas dibiarkan tanpa centang.',
+    cocok: t => /\b(denda|sanksi)\b|\bSTP\b|surat tagihan pajak|bunga penagihan|bunga pajak/i.test(t) ? (RE_PAJAK_KATA.test(t) ? 'pasti' : 'periksa') : null },
+  { kat: 'sumbangan', label: 'Sumbangan, donasi, dan hadiah',
+    catatan: 'Sumbangan tertentu (misalnya bencana nasional, fasilitas pendidikan, penelitian, pembinaan olahraga, dan zakat ke lembaga resmi) boleh dibiayakan bila memenuhi syarat. Hilangkan centang pada yang memenuhi syarat.',
+    cocok: t => /sumbangan|donasi|infa[kq]|sedekah|zakat|santunan|hadiah|bingkisan|parcel|hampers/i.test(t) ? 'pasti' : null },
+  { kat: 'jamuan', label: 'Jamuan dan representasi',
+    catatan: 'Jamuan dan representasi hanya boleh dibiayakan bila ada daftar nominatif (nama, tempat, tanggal, jenis, jumlah, dan relasi usaha). Hilangkan centang pada yang sudah punya daftarnya.',
+    cocok: t => /jamuan|menjamu|representasi|entertain|traktir|makan\s+(siang|malam)?\s*(dengan\s+)?(klien|tamu|relasi|customer)/i.test(t) ? 'pasti' : null },
+  { kat: 'pribadi', label: 'Biaya pribadi, natura, dan kenikmatan',
+    catatan: 'Pengeluaran untuk kepentingan pribadi pemegang saham atau pengurus, dan kenikmatan dalam bentuk natura, umumnya tidak boleh dikurangkan.',
+    cocok: t => /pribadi|prive|keperluan keluarga|rumah tangga|natura|kenikmatan/i.test(t) ? 'pasti' : null },
+];
+const RE_P25 = /\bPPH\b[\s.\-]*(?:PS|PSL|PASAL)?[\s.\-]*25\b|\bPPH25\b|\bPAJAK PENGHASILAN\b[\s.\-]*(?:PS|PSL|PASAL)?[\s.\-]*25\b|\bANGSURAN\s+(PPH|PAJAK)\b/i;
+function saranSpt(J, am, th) {
+  const awal = th + '-01-01', akhir = th + '-12-31', LABA_RUGI = { beban: 1, hpp: 1, beban_lain: 1 };
+  const grup = SPT_SARAN.map(g => ({ kat: g.kat, label: g.label, catatan: g.catatan, items: [] }));
+  const p25 = [];
+  (J || []).forEach(j => {
+    if (!j.tgl || j.tgl < awal || j.tgl > akhir) return;
+    if (j.sumber === 'kas' && j.jenis === 'keluar' && RE_P25.test(j.ket || '')) {
+      const d = (j.baris && j.baris[0] && j.baris[0].d) || 0;
+      if (d > 0) p25.push({ kunci: j.id, tgl: j.tgl, ket: j.ket, jml: d });
+    }
+    (j.baris || []).forEach((b, i) => {
+      const a = am[b.akun];
+      if (!a || !(b.d > 0) || !LABA_RUGI[a.tipe]) return;
+      const txt = (j.ket || '') + ' ' + a.nama;
+      for (let gi = 0; gi < SPT_SARAN.length; gi++) {
+        const r = SPT_SARAN[gi].cocok(txt);
+        if (r) { grup[gi].items.push({ kunci: j.id + '|' + b.akun + '|' + i, tgl: j.tgl, ket: j.ket || a.nama, akun: a.nama, jml: b.d, periksa: r === 'periksa' }); break; }
+      }
+    });
+  });
+  const urut = (a, b) => (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : 0);
+  grup.forEach(g => g.items.sort(urut)); p25.sort(urut);
+  return { grup: grup.filter(g => g.items.length), p25 };
 }
 
 /* Perhitungan murni: lr = hasil M.lr() untuk setahun penuh, inp = isian pengguna, th = tahun pajak. */
@@ -3213,7 +3285,7 @@ const sptKolom = th => ({ a: th + '-01', b: th + '-12', ym: th + '-12', label: '
 function sptBaris(k, daftar, th) {
   return daftar.map((r, i) => '<div class="spt-row">' + (k === 'rugi'
     ? '<input class="in" style="width:96px;flex:none" inputmode="numeric" maxlength="4" id="spt-' + k + '-t-' + i + '" data-spt-k="' + k + '" data-spt-f="tahun" data-i="' + i + '" data-act-change="sptSimpan" value="' + esc(r.tahun || '') + '" placeholder="Tahun" aria-label="Tahun terjadinya kerugian">'
-    : '<input class="in grow" id="spt-' + k + '-k-' + i + '" data-spt-k="' + k + '" data-spt-f="ket" data-i="' + i + '" data-act-change="sptSimpan" value="' + esc(r.ket) + '" placeholder="Uraian koreksi" aria-label="Uraian">') +
+    : '<input class="in grow" id="spt-' + k + '-k-' + i + '" data-spt-k="' + k + '" data-spt-f="ket" data-i="' + i + '" data-act-change="sptSimpan"' + (r.kunci && r.kunci.length ? ' data-kunci="' + esc(JSON.stringify(r.kunci)) + '"' : '') + ' value="' + esc(r.ket) + '" placeholder="Uraian koreksi" aria-label="Uraian">') +
     '<input class="in uang num-in" style="width:160px;flex:none" inputmode="numeric" id="spt-' + k + '-j-' + i + '" data-spt-k="' + k + '" data-spt-f="jml" data-i="' + i + '" data-act-change="sptSimpan" value="' + (r.jml ? fmtN.format(r.jml) : '') + '" placeholder="0" aria-label="Jumlah (Rp)">' +
     '<button class="btn sm ghost" data-act="sptHapus" data-k="' + k + '" data-i="' + i + '" aria-label="Hapus baris">' + IC.tutup + '</button></div>').join('');
 }
@@ -3224,6 +3296,32 @@ function sptDaftar(judul, k, daftar, th, bantu) {
     '<div class="spt-row" style="margin-top:8px">' + presets + '<button class="btn sm" data-act="sptTambah" data-k="' + k + '">' + IC.plus + ' Tambah</button></div></div>';
 }
 
+const sptItemSaran = (kat, i, cek) => '<label class="spt-sar-i"><input type="checkbox" data-sar="' + kat + '" value="' + esc(i.kunci) + '"' + (cek ? ' checked' : '') + '><span class="spt-sar-t"><span class="spt-sar-k">' + esc(i.ket) + '</span><small>' + tglFmt(i.tgl) + (i.akun ? ' · ' + esc(i.akun) : '') + (i.periksa ? ' · <b>periksa dulu</b>' : '') + '</small></span><b class="n">' + rp(i.jml) + '</b></label>';
+function sptSaranHtml(S, inp) {
+  const dipakai = new Set(inp.ditolak);
+  inp.pos.forEach(r => (r.kunci || []).forEach(k => dipakai.add(k)));
+  const grup = S.grup.map(g => Object.assign({}, g, { items: g.items.filter(i => !dipakai.has(i.kunci)) })).filter(g => g.items.length);
+  if (!grup.length && !inp.ditolak.length) return '';
+  let h = '<div class="spt-sar"><h3>Saran otomatis dari transaksi</h3><p class="note" style="margin:0 0 8px">Dibaca dari uraian transaksi dan nama akun, jadi bisa meleset atau tidak lengkap. Buka tiap kelompok, hilangkan centang yang tidak perlu, lalu tambahkan sebagai koreksi.</p>';
+  if (!grup.length) h += '<p class="note" style="margin:0 0 8px">Tidak ada saran baru.</p>';
+  grup.forEach(g => {
+    const tot = g.items.reduce((s, i) => s + i.jml, 0);
+    h += '<details class="spt-sar-g"><summary><span>' + esc(g.label) + '</span><small>' + g.items.length + ' transaksi · ' + rp(tot) + '</small></summary>' +
+      '<p class="note" style="margin:6px 0">' + esc(g.catatan) + '</p>' + g.items.map(i => sptItemSaran(g.kat, i, !i.periksa)).join('') +
+      '<div class="spt-row" style="margin-top:8px"><button class="btn sm pri" type="button" data-act="sptTerimaSaran" data-kat="' + g.kat + '">Tambahkan yang dicentang sebagai koreksi positif</button><button class="btn sm ghost" type="button" data-act="sptTolakSaran" data-kat="' + g.kat + '">Abaikan kelompok ini</button></div></details>';
+  });
+  if (inp.ditolak.length) h += '<p class="note" style="margin:8px 0 0">' + inp.ditolak.length + ' saran diabaikan. <button class="btn sm ghost" type="button" data-act="sptPulihSaran">Tampilkan lagi</button></p>';
+  return h + '</div>';
+}
+function sptP25Html(S) {
+  if (!S.p25.length) return '';
+  const tot = S.p25.reduce((s, i) => s + i.jml, 0);
+  return '<details class="spt-sar-g" style="margin-top:12px"><summary><span>Setoran PPh Pasal 25 terbaca dari mutasi bank</span><small>' + S.p25.length + ' transaksi · ' + rp(tot) + '</small></summary>' +
+    '<p class="note" style="margin:6px 0">Dikenali dari kata PPh 25 atau angsuran PPh di uraian. Angsuran masa Desember yang dibayar Januari tahun berikutnya tidak terhitung di sini, sedangkan setoran Januari tahun ini bisa jadi untuk masa Desember tahun lalu. Hilangkan centang bila bukan untuk tahun pajak ini.</p>' +
+    S.p25.map(i => sptItemSaran('p25', i, true)).join('') +
+    '<div class="spt-row" style="margin-top:8px"><button class="btn sm pri" type="button" data-act="sptPakaiP25">Isikan ke PPh Pasal 25</button></div></details>';
+}
+const sptSaranKini = () => saranSpt(M.J, M.am, UI.tahun);
 const sptTarifTeks = h => (h.tarif === 'final' ? 'PPh final UMKM 0,5% dari peredaran usaha' : 'Tarif normal 22%' + (h.bruto <= SPT_B50 ? ' dengan fasilitas Pasal 31E' : ''));
 const sptTabel = baris => '<div class="tw"><table class="t st"><tbody>' + baris + '</tbody></table></div>';
 function sptCalcHtml(h) {
@@ -3281,6 +3379,7 @@ function vSpt() {
   o += '<form class="panel" id="spt-form" style="margin-bottom:14px" onsubmit="return false"><div class="panel-h"><h2>2. Rekonsiliasi fiskal</h2><span class="sub">Koreksi laba komersial menjadi laba fiskal</span></div>' +
     '<p class="note" style="margin-bottom:12px">Sebagian biaya dan penghasilan diperlakukan berbeda oleh aturan pajak. Isi koreksinya di sini. Contoh yang tercantum hanya pengingat, bukan daftar lengkap, dan tiap jenis koreksi punya syarat masing-masing.</p>' +
     (bunga > 0.5 && !sudahBunga ? '<div class="banner" style="margin-bottom:12px"><div>Ada pendapatan bunga/jasa giro <b>' + rp(bunga) + '</b> di pembukuan. Bunga bank umumnya sudah dipotong PPh final sehingga dikoreksi negatif. <button class="btn sm" data-act="sptBunga">Masukkan sebagai koreksi negatif</button></div></div>' : '') +
+    sptSaranHtml(sptSaranKini(), inp) +
     '<div class="spt-dua">' +
     sptDaftar('Koreksi positif (menambah laba)', 'pos', inp.pos, th, 'Biaya yang tidak boleh dikurangkan menurut pajak.') +
     sptDaftar('Koreksi negatif (mengurangi laba)', 'neg', inp.neg, th, 'Penghasilan yang final atau bukan objek pajak, dan pengurang lainnya.') + '</div>' +
@@ -3299,7 +3398,7 @@ function vSpt() {
   } else {
     tarifBlok += fldU('spt-bruto', 'Peredaran bruto (acuan batas Rp4,8 miliar dan Rp50 miliar)', inp.bruto, ' placeholder="' + fmtN.format(h.brutoAuto) + '"') + '<div class="fld"><span class="lbl">Otomatis dari pembukuan</span><div class="hint" style="padding-top:10px">' + rp(h.brutoAuto) + ' (pendapatan usaha + pendapatan lain). Isi kolom di samping bila peredaran bruto menurut aturan berbeda; kosongkan untuk memakai angka otomatis.</div></div></div>';
     kreditBlok = '<h3 style="margin:16px 0 8px;font-size:14px">Kredit pajak (sudah dibayar atau dipotong pihak lain)</h3><div class="grid2">' +
-      fldU('spt-k22', 'PPh Pasal 22', inp.kredit.p22) + fldU('spt-k23', 'PPh Pasal 23 dan 26', inp.kredit.p23) + fldU('spt-k24', 'PPh Pasal 24 (luar negeri)', inp.kredit.p24) + fldU('spt-k25', 'PPh Pasal 25 (angsuran bulanan)', inp.kredit.p25) + '</div>';
+      fldU('spt-k22', 'PPh Pasal 22', inp.kredit.p22) + fldU('spt-k23', 'PPh Pasal 23 dan 26', inp.kredit.p23) + fldU('spt-k24', 'PPh Pasal 24 (luar negeri)', inp.kredit.p24) + fldU('spt-k25', 'PPh Pasal 25 (angsuran bulanan)', inp.kredit.p25) + '</div>' + sptP25Html(sptSaranKini());
   }
   o += '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>3. Perhitungan PPh terutang</h2><span class="sub" id="spt-tarifteks">' + esc(sptTarifTeks(h)) + '</span></div>' +
     '<div id="spt-calc">' + sptCalcHtml(h) + '</div>' + tarifBlok + '<div id="spt-out1">' + sptOut1Html(h) + '</div>' + kreditBlok + '<div id="spt-out2">' + sptOut2Html(h) + '</div><div id="spt-warn">' + sptWarnHtml(h) + '</div>' +
@@ -3323,7 +3422,9 @@ function sptBaca() {
   const o = sptKosong(), q = (k, f) => Array.from(document.querySelectorAll('[data-spt-k="' + k + '"][data-spt-f="' + f + '"]'));
   ['pos', 'neg'].forEach(k => q(k, 'ket').forEach(el => {
     const j = document.querySelector('[data-spt-k="' + k + '"][data-spt-f="jml"][data-i="' + el.dataset.i + '"]');
-    o[k].push({ ket: el.value.trim(), jml: j ? Math.abs(bacaUang(j)) : 0 });
+    const r = { ket: el.value.trim(), jml: j ? Math.abs(bacaUang(j)) : 0 };
+    try { const kk = JSON.parse(el.dataset.kunci || '[]'); if (Array.isArray(kk) && kk.length) r.kunci = kk; } catch (e) { /* abaikan */ }
+    o[k].push(r);
   }));
   q('rugi', 'tahun').forEach(el => {
     const j = document.querySelector('[data-spt-k="rugi"][data-spt-f="jml"][data-i="' + el.dataset.i + '"]');
@@ -3333,6 +3434,7 @@ function sptBaca() {
   const br = $('#spt-bruto'); o.bruto = br && br.value.trim() !== '' ? Math.abs(bacaUang(br)) : null;
   [['p22', 'spt-k22'], ['p23', 'spt-k23'], ['p24', 'spt-k24'], ['p25', 'spt-k25']].forEach(([k, id]) => { const e = document.getElementById(id); o.kredit[k] = e ? Math.abs(bacaUang(e)) : 0; });
   const fs = $('#spt-fsetor'); o.finalSetor = fs ? Math.abs(bacaUang(fs)) : 0;
+  o.ditolak = sptGabung((((M.cfg.laporan || {})[UI.tahun]) || {}).spt).ditolak.slice();
   return o;
 }
 function sptSimpanNilai(o, diam) {
@@ -3358,6 +3460,31 @@ const ACT_SPT = {
     if (sptSimpanNilai(o)) render();
   },
   unduhSpt() { unduhSpt(); },
+  sptTerimaSaran(el) {
+    const kat = el.dataset.kat, g = sptSaranKini().grup.find(x => x.kat === kat);
+    if (!g) return;
+    const pilih = new Set(Array.from(document.querySelectorAll('input[data-sar="' + kat + '"]:checked')).map(e => e.value));
+    const it = g.items.filter(i => pilih.has(i.kunci));
+    if (!it.length) { toast('Centang dulu transaksi yang mau dimasukkan.', true); return; }
+    const o = sptBaca(), tot = Math.round(it.reduce((s, i) => s + i.jml, 0));
+    o.pos.push({ ket: g.label + (it.length > 1 ? ' (' + it.length + ' transaksi)' : ''), jml: tot, kunci: it.map(i => i.kunci) });
+    if (sptSimpanNilai(o)) { render(); toast('Koreksi positif ' + rp(tot) + ' ditambahkan. Periksa lagi sebelum dipakai.'); }
+  },
+  sptTolakSaran(el) {
+    const g = sptSaranKini().grup.find(x => x.kat === el.dataset.kat);
+    if (!g) return;
+    const o = sptBaca(); g.items.forEach(i => { if (o.ditolak.indexOf(i.kunci) < 0) o.ditolak.push(i.kunci); });
+    if (sptSimpanNilai(o)) { render(); toast('Saran diabaikan. Bisa ditampilkan lagi di bawah daftar saran.'); }
+  },
+  sptPulihSaran() { const o = sptBaca(); o.ditolak = []; if (sptSimpanNilai(o)) render(); },
+  sptPakaiP25() {
+    const S = sptSaranKini(), pilih = new Set(Array.from(document.querySelectorAll('input[data-sar="p25"]:checked')).map(e => e.value));
+    const it = S.p25.filter(i => pilih.has(i.kunci));
+    if (!it.length) { toast('Centang dulu setoran yang mau dipakai.', true); return; }
+    const o = sptBaca(), tot = Math.round(it.reduce((s, i) => s + i.jml, 0));
+    o.kredit.p25 = tot;
+    if (sptSimpanNilai(o)) { render(); toast('PPh Pasal 25 diisi ' + rp(tot) + '. Cocokkan dengan bukti setor.'); }
+  },
 };
 const ACTC_SPT = {
   sptSimpan() {
@@ -3723,6 +3850,13 @@ function bacaBerkasTeks(file, cb) {
 }
 
 const ACT = {
+  async muatTerbaru() {
+    try {
+      if ('serviceWorker' in navigator) { const rs = await navigator.serviceWorker.getRegistrations(); await Promise.all(rs.map(r => r.unregister())); }
+      if (window.caches) { const ks = await caches.keys(); await Promise.all(ks.filter(k => k.indexOf('pembukuan-') === 0).map(k => caches.delete(k))); }
+    } catch (e) { /* tetap muat ulang */ }
+    const u = new URL(location.href); u.searchParams.set('v', Date.now().toString(36)); location.replace(u.toString());
+  },
   nav(el) { UI.page = el.dataset.id; try { history.replaceState(null, '', '#' + UI.page); } catch (e) { /* abaikan */ } window.scrollTo(0, 0); render(); },
   keSetelan(el) { UI.page = 'pengaturan'; UI.set.tab = el.dataset.tab; window.scrollTo(0, 0); render(); },
   tabJurnal(el) { UI.jurnal.tab = el.dataset.t; render(); },
@@ -3930,7 +4064,7 @@ window.addEventListener('hashchange', () => { const h = location.hash.slice(1); 
 })();
 
 if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
-  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js').catch(() => {}); });
+  window.addEventListener('load', () => { navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' }).catch(() => {}); });
 }
 </script>
 </body>

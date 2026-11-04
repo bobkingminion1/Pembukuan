@@ -37,5 +37,7 @@ CATATAN
    kerugian, penghasilan kena pajak, PPh terutang (tarif 22% dengan fasilitas Pasal 31E, atau PPh final
    0,5%), kredit pajak, dan unduhan Excel. Ini alat bantu hitung, bukan pelaporan: SPT tetap diisi dan
    dikirim lewat Coretax, sebaiknya dengan konsultan pajak. Aturan tarif bisa berubah, jadi periksa lagi.
+   Aplikasi juga mengusulkan koreksi fiskal (sumbangan, jamuan, denda pajak, biaya pribadi) dan membaca
+   setoran PPh 25 dari uraian transaksi. Itu hanya usulan dari kata-kata di uraian: periksa tiap item.
  - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama (index.html dan sw.js
    wajib ikut diganti agar versi baru terpasang).
