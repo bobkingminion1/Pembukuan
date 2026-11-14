@@ -44,5 +44,15 @@ CATATAN
    berisi teks (bukan hasil scan); hasil bacaan tampil dulu di formulir untuk diperiksa. Pembayaran dicatat
    dari tombol Terima/Bayar atau dicocokkan otomatis saat impor mutasi bank. Ada rekap PPN dan umur
    piutang/utang. Faktur pajak resmi tetap dibuat di Coretax; rekap PPN hanya alat bantu.
+ - Menu HPP & Persediaan (HPP = harga pokok penjualan) mencatat stok barang dan menghitung HPP otomatis
+   dengan metode rata-rata bergerak. Aktifkan dulu di menu itu (pilih tanggal mulai). Isi daftar barang
+   (barang dagang, bahan baku, barang jadi), catat stok awal, lalu catat pembelian dan penjualan lewat
+   tombol di menu itu. Setiap penjualan membuat jurnal HPP otomatis (Beban HPP / Persediaan). Transaksi
+   lama yang sudah ada di akun Persediaan atau Penjualan bisa dirinci per barang lewat daftar
+   "Perlu dirinci per barang". Ada juga produksi (bahan + upah + overhead jadi barang jadi), stok opname
+   (selisih masuk ke akun 5-1200), kartu stok, Laporan HPP (periodik, per tahun atau per bulan), kalkulator
+   HPP per produk dari resep, dan laba per proyek untuk usaha jasa/proyek. Semua bisa diunduh ke Excel.
+   Jumlah stok dan nilainya dihitung dari catatan stok; bandingkan dengan saldo akun Persediaan di
+   buku besar (ada penanda selisih). Ini alat bantu pembukuan, bukan nasihat pajak.
  - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama (index.html dan sw.js
    wajib ikut diganti agar versi baru terpasang).

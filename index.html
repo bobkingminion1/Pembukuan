@@ -465,6 +465,25 @@ select.in { padding-right: 6px; }
 
 @media (max-width: 640px) { .hero.inv-hero { grid-template-columns: 1fr 1fr; gap: 10px; } .hero.inv-hero .tile { padding: 12px; } .hero.inv-hero .tile .v { font-size: 19px; } }
 
+/* ===== HPP & Persediaan ===== */
+.hl { display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr) minmax(0, 1.3fr) auto; gap: 6px 8px; align-items: start; margin-bottom: 10px; }
+.hl.hl-qty { grid-template-columns: minmax(0, 2.2fr) minmax(0, 1fr) auto; }
+.hl .hl-x { padding: 0 8px; height: 36px; }
+.sum .pos, .pos { color: var(--pos); }
+@media (max-width: 640px) {
+  .hl, .hl.hl-qty { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; padding-bottom: 10px; border-bottom: 1px dashed var(--line); }
+  .hl .hl-b { grid-column: 1 / -1; }
+  .hl .hl-h { grid-column: 2; }
+  .hl .hl-q { grid-column: 1; grid-row: 2; }
+  .hl .hl-h { grid-row: 2; }
+  .hl .hl-x { grid-column: 3; grid-row: 2; }
+  .hl.hl-qty .hl-q { grid-column: 1 / 3; }
+  .hl.hl-qty .hl-x { grid-column: 3; }
+}
+
+.seg.full { display: flex; width: 100%; }
+.seg.full button { flex: 1; }
+
 </style>
 </head>
 <body>
@@ -650,13 +669,17 @@ function buatModel(S) {
     const m = S.months[ym];
     (m.tx || []).forEach(t => {
       txAll.push(t); txById[t.id] = t;
-      J.push({ id: t.id, tgl: t.tgl, ket: ketTx(t, am), ref: t.ref, sumber: 'kas', jenis: t.jenis, baris: txBaris(t) });
+      J.push({ id: t.id, tgl: t.tgl, ket: ketTx(t, am), ref: t.ref, sumber: 'kas', jenis: t.jenis, baris: txBaris(t), prj: t.prj || null, stk: !!(t.stk && t.stk.length) });
     });
     (m.jr || []).forEach(j => {
       jrById[j.id] = j;
-      J.push({ id: j.id, tgl: j.tgl, ket: j.ket, ref: j.ref, sumber: 'manual', baris: j.baris, inv: j.inv || null });
+      if (j.hs) return;   // catatan stok murni (stok awal, opname, produksi): jurnalnya dibentuk mesin HPP
+      J.push({ id: j.id, tgl: j.tgl, ket: j.ket, ref: j.ref, sumber: 'manual', baris: j.baris, inv: j.inv || null, prj: j.prj || null, stk: !!(j.stk && j.stk.length) });
     });
   });
+  // HPP & persediaan (opsional): jurnal HPP, selisih opname, dan biaya produksi dibentuk otomatis dari catatan stok
+  let HPP = null;
+  if (typeof hppHitung === 'function' && cfg.hpp && cfg.hpp.aktif) { HPP = hppHitung(S, cfg); HPP.jurnal.forEach(j => J.push(j)); }
   J.forEach((j, i) => { j._i = i; });
   J.sort((a, b) => (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : a._i - b._i));
   const jIdx = {};
@@ -717,7 +740,7 @@ function buatModel(S) {
 
   const adaDataTahun = th => post.some(p => p.ym.slice(0, 4) === String(th) && p.jid !== 'saldo-awal');
 
-  return { cfg, akun, am, normalD, kasAkun, kasSet, J, jIdx, post, by, bln, txAll, txById, jrById, nilai, mut, mutT, saldoSd, lr, saldoKas, saldoAwalKas, bukuKas, openKas, openYm, adaDataTahun };
+  return { cfg, akun, am, normalD, kasAkun, kasSet, J, jIdx, post, by, bln, txAll, txById, jrById, nilai, mut, mutT, saldoSd, lr, saldoKas, saldoAwalKas, bukuKas, openKas, openYm, adaDataTahun, hpp: HPP };
 }
 
 /* ================= Laporan (garis-garis) =================
@@ -952,10 +975,263 @@ function akunDipakai(S, kode) {
   for (const ym in S.months) {
     const m = S.months[ym];
     if ((m.tx || []).some(t => t.akun === kode || t.lawan === kode)) return true;
-    if ((m.jr || []).some(j => j.baris.some(b => b.akun === kode))) return true;
+    if ((m.jr || []).some(j => j.baris.some(b => b.akun === kode) || (j.hs && (j.hs.tklAkun === kode || j.hs.bopAkun === kode || j.hs.lawan === kode)))) return true;
   }
+  const hp = S.config.hpp;
+  if (hp && hp.aktif && [hp.akunPers || '1-1400', hp.akunHpp, hp.akunSelisih, hp.akunEkuitas].concat(hp.akunJual || []).indexOf(kode) >= 0) return true;
   const sa = S.config.saldoAwal;
   return !!(sa && sa.nilai && Math.abs(sa.nilai[kode] || 0) > 0);
+}
+
+
+/* ===== hpp.js ===== */
+/* ================= HPP: persediaan, produksi, proyek, kalkulator resep =================
+   Fitur ini opsional (cfg.hpp.aktif). Data stok tidak punya tabel sendiri:
+   - transaksi kas (tx) atau jurnal/invoice (jr) membawa bidang `stk` = [{ b: id barang, q, h|n }]
+     q > 0 = barang masuk (h = harga satuan, n = nilai total), q < 0 = barang keluar (nilainya dihitung sistem).
+   - catatan tanpa uang di kedua sisi (stok awal, stok opname, produksi) disimpan sebagai jr dengan `hs`
+     ({ k: 'awal' | 'opname' | 'prod', ... }) dan `baris: []`.
+   Nilai barang keluar memakai rata-rata bergerak dan dihitung ulang dari seluruh catatan tiap kali, jadi
+   mengubah atau menambah catatan bertanggal lampau otomatis membetulkan HPP sesudahnya. Jurnal HPP,
+   selisih opname, dan kapitalisasi biaya produksi ikut dibentuk otomatis (sumber 'hpp') dan tidak disimpan.
+   Penyimpanan, sinkronisasi, dan cadangan memakai jalur yang sama dengan transaksi dan jurnal biasa.      */
+const HPP_AKUN = {
+  hpp: ['5-1100', 'Harga Pokok Penjualan (Otomatis)', 'hpp'],
+  selisih: ['5-1200', 'Selisih Persediaan (Stok Opname)', 'hpp'],
+};
+const HPP_JENIS = { dagang: 'Barang dagang', bahan: 'Bahan baku', jadi: 'Barang jadi (hasil produksi)' };
+const HPP_EPS = 1e-9;
+const hppQ = x => Math.round((+x || 0) * 1e6) / 1e6;
+const hppRp = x => Math.round(+x || 0);
+const hppAktif = cfg => !!(cfg && cfg.hpp && cfg.hpp.aktif);
+const hppNilaiMasuk = l => (l.n != null && l.n !== '' ? hppRp(l.n) : hppRp((+l.q || 0) * (+l.h || 0)));
+function hppCfgBaru(mulai) {
+  return { aktif: true, mulai: mulai || '', akunPers: '1-1400', akunHpp: HPP_AKUN.hpp[0], akunSelisih: HPP_AKUN.selisih[0], akunJual: ['4-1000'], akunEkuitas: '3-2000', barang: {}, resep: {}, proyek: {} };
+}
+// akun yang dibutuhkan fitur ini tetapi belum ada di bagan akun
+function hppAkunKurang(cfg) {
+  const ada = new Set((cfg.akun || []).map(a => a.kode)), H = cfg.hpp || {};
+  const perlu = [HPP_AKUN.hpp, HPP_AKUN.selisih];
+  if (!ada.has(H.akunPers || '1-1400')) perlu.push(['1-1400', 'Persediaan Barang', 'aset_lancar']);
+  return perlu.filter(a => !ada.has(a[0]));
+}
+
+/* ----- kumpulkan catatan stok dari transaksi dan jurnal, urut menurut tanggal ----- */
+function hppKumpul(S) {
+  const ev = []; let i = 0;
+  Object.keys((S && S.months) || {}).sort().forEach(ym => {
+    const m = S.months[ym];
+    (m.tx || []).forEach(t => { if (Array.isArray(t.stk) && t.stk.length) ev.push({ id: t.id, tgl: t.tgl, i: i++, k: 'tx', lines: t.stk, ket: t.ket || '', ref: t.ref || '', rec: t, sumber: 'tx' }); });
+    (m.jr || []).forEach(j => {
+      if (j.hs && j.hs.k) ev.push({ id: j.id, tgl: j.tgl, i: i++, k: j.hs.k, hs: j.hs, lines: j.stk || [], ket: j.ket || '', ref: j.ref || '', rec: j, sumber: 'jr' });
+      else if (Array.isArray(j.stk) && j.stk.length) ev.push({ id: j.id, tgl: j.tgl, i: i++, k: 'jr', lines: j.stk, ket: j.ket || '', ref: j.ref || '', rec: j, sumber: 'jr' });
+    });
+  });
+  // urutan dalam satu hari: stok awal, pembelian, produksi, penjualan, opname (opname menghitung stok sesudah semuanya)
+  const rank = e => (e.k === 'awal' ? 0 : e.k === 'prod' ? 2 : e.k === 'opname' ? 4 : e.lines.some(l => l.q > 0) ? 1 : 3);
+  ev.forEach(e => { e.r = rank(e); });
+  ev.sort((a, b) => (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : a.r - b.r || a.i - b.i));
+  return ev;
+}
+
+/* ----- mesin stok: rata-rata bergerak dengan nilai bulat rupiah ----- */
+function hppHitung(S, cfg) {
+  const H = hppAktif(cfg) ? cfg.hpp : null;
+  if (!H) return null;
+  const brg = H.barang || {};
+  const akunPers = H.akunPers || '1-1400', akunHpp = H.akunHpp || HPP_AKUN.hpp[0], akunSel = H.akunSelisih || HPP_AKUN.selisih[0];
+  const st = {}, kartu = {}, rows = [], jurnal = [], produksi = [], peringatan = [], minus = {}, tanpaHarga = {};
+  const get = b => st[b] || (st[b] = { q: 0, n: 0, avg: 0 });
+  const nama = b => (brg[b] ? brg[b].nama : '(barang dihapus)');
+  const jenisB = b => (brg[b] && brg[b].jenis) || 'dagang';
+  const catat = (e, b, tipe, dq, dn, s) => {
+    const r = { tgl: e.tgl, id: e.id, b, tipe, jenis: jenisB(b), ket: e.ket, ref: e.ref, dq, dn, q: s.q, n: s.n };
+    rows.push(r); (kartu[b] = kartu[b] || []).push(r);
+  };
+  function masuk(e, b, q, n, tipe) {
+    const s = get(b); q = hppQ(q);
+    s.q = hppQ(s.q + q); s.n += n;
+    if (s.q > HPP_EPS) s.avg = s.n / s.q;
+    catat(e, b, tipe, q, n, s);
+  }
+  function keluar(e, b, q, tipe) {
+    const s = get(b); q = hppQ(q);
+    let cost;
+    if (s.q > HPP_EPS && q <= s.q + HPP_EPS) cost = Math.abs(q - s.q) <= HPP_EPS ? s.n : Math.round(q * s.n / s.q);
+    else {
+      cost = (s.q > HPP_EPS ? s.n : 0) + Math.round((q - Math.max(s.q, 0)) * s.avg);
+      if (!minus[b]) { minus[b] = true; peringatan.push({ k: 'minus', b, id: e.id, tgl: e.tgl, teks: 'Stok ' + nama(b) + ' minus pada ' + e.tgl + ': barang keluar lebih banyak dari yang tercatat masuk. Catat pembelian atau stok awalnya dengan tanggal sebelum itu.' }); }
+      if (!(s.avg > 0) && !tanpaHarga[b]) { tanpaHarga[b] = true; peringatan.push({ k: 'tanpaharga', b, id: e.id, tgl: e.tgl, teks: nama(b) + ' keluar sebelum ada harga pokoknya, jadi HPP-nya Rp0. Catat pembelian atau stok awalnya.' }); }
+    }
+    s.q = hppQ(s.q - q); s.n -= cost;
+    catat(e, b, tipe, -q, -cost, s);
+    return cost;
+  }
+  const buatJr = (e, ket, baris) => ({ id: 'hpp-' + e.id, tgl: e.tgl, ket, ref: e.ref, sumber: 'hpp', src: e.id, prj: (e.rec && e.rec.prj) || null, baris: baris.filter(x => x.d || x.k) });
+
+  hppKumpul(S).forEach(e => {
+    if (e.k === 'awal') {
+      let tot = 0;
+      e.lines.forEach(l => { if (!(l.q > 0)) return; const n = hppNilaiMasuk(l); masuk(e, l.b, l.q, n, 'awal'); tot += n; });
+      if (e.hs.jurnal && tot) jurnal.push(buatJr(e, e.ket || 'Stok awal persediaan', [{ akun: akunPers, d: tot, k: 0 }, { akun: e.hs.lawan || H.akunEkuitas || '3-2000', d: 0, k: tot }]));
+    } else if (e.k === 'tx' || e.k === 'jr') {
+      e.lines.forEach(l => { if (l.q > 0) masuk(e, l.b, l.q, hppNilaiMasuk(l), 'beli'); });
+      let C = 0;
+      e.lines.forEach(l => { if (l.q < 0) C += keluar(e, l.b, -l.q, 'jual'); });
+      if (C) jurnal.push(buatJr(e, 'HPP · ' + (e.ket || e.ref || 'penjualan'), [{ akun: akunHpp, d: C, k: 0 }, { akun: akunPers, d: 0, k: C }]));
+    } else if (e.k === 'opname') {
+      let net = 0;
+      e.lines.forEach(l => {
+        const s = get(l.b), diff = hppQ(hppQ(l.fisik) - s.q);
+        if (Math.abs(diff) <= HPP_EPS) return;
+        if (diff > 0) { const n = Math.round(diff * s.avg); masuk(e, l.b, diff, n, 'opname'); net += n; }
+        else net -= keluar(e, l.b, -diff, 'opname');
+      });
+      if (net) jurnal.push(buatJr(e, e.ket || 'Selisih stok opname', net > 0 ? [{ akun: akunPers, d: net, k: 0 }, { akun: akunSel, d: 0, k: net }] : [{ akun: akunSel, d: -net, k: 0 }, { akun: akunPers, d: 0, k: -net }]));
+    } else if (e.k === 'prod') {
+      let bahan = 0; const bl = [];
+      e.lines.forEach(l => { if (l.q < 0) { const c = keluar(e, l.b, -l.q, 'prod-keluar'); bahan += c; bl.push({ b: l.b, q: -l.q, n: c }); } });
+      const tkl = hppRp(e.hs.tkl), bop = hppRp(e.hs.bop), total = bahan + tkl + bop, qty = hppQ(e.hs.qty);
+      if (e.hs.jadi && qty > 0) masuk(e, e.hs.jadi, qty, total, 'prod-masuk');
+      else peringatan.push({ k: 'prod', id: e.id, tgl: e.tgl, teks: 'Catatan produksi ' + e.tgl + ' belum punya barang jadi atau jumlah hasil, jadi hasilnya tidak masuk stok.' });
+      const kap = tkl + bop;
+      if (kap) jurnal.push(buatJr(e, e.ket || 'Biaya produksi masuk persediaan', [{ akun: akunPers, d: kap, k: 0 }, { akun: e.hs.tklAkun || akunHpp, d: 0, k: tkl }, { akun: e.hs.bopAkun || akunHpp, d: 0, k: bop }]));
+      produksi.push({ id: e.id, tgl: e.tgl, ket: e.ket, jadi: e.hs.jadi, qty, bahan, tkl, bop, total, perUnit: qty > 0 ? total / qty : 0, bl });
+    }
+  });
+  const nilai = Object.keys(st).reduce((s, b) => s + st[b].n, 0);
+  return { H, st, kartu, rows, jurnal, produksi, peringatan, nilai, akunPers, akunHpp, akunSel };
+}
+// jumlah stok barang pada akhir tanggal tertentu (untuk formulir opname)
+function hppStokPer(R, b, tgl, kecuali) {
+  let q = 0;
+  ((R && R.kartu[b]) || []).forEach(r => { if (r.tgl <= tgl && r.id !== kecuali) q += r.dq; });
+  return hppQ(q);
+}
+// ringkasan per barang untuk satu periode: stok awal, masuk, keluar, akhir (jumlah dan nilai)
+function hppRekapBarang(R, a, b) {
+  const out = {};
+  const e = id => out[id] || (out[id] = { b: id, awalQ: 0, awalN: 0, masukQ: 0, masukN: 0, keluarQ: 0, keluarN: 0, akhirQ: 0, akhirN: 0 });
+  ((R && R.rows) || []).forEach(r => {
+    const ym = r.tgl.slice(0, 7), x = e(r.b);
+    if (ym < a) { x.awalQ += r.dq; x.awalN += r.dn; }
+    else if (ym <= b) { if (r.dq >= 0) { x.masukQ += r.dq; x.masukN += r.dn; } else { x.keluarQ += -r.dq; x.keluarN += -r.dn; } }
+  });
+  return Object.keys(out).map(id => { const x = out[id]; x.awalQ = hppQ(x.awalQ); x.masukQ = hppQ(x.masukQ); x.keluarQ = hppQ(x.keluarQ); x.akhirQ = hppQ(x.awalQ + x.masukQ - x.keluarQ); x.akhirN = x.awalN + x.masukN - x.keluarN; return x; });
+}
+
+/* ----- laporan periode: roll-forward persediaan per kelompok barang ----- */
+const HPP_TIPE_KOLOM = { beli: 'beli', awal: 'awalDicatat', 'prod-masuk': 'prodMasuk', jual: 'jual', 'prod-keluar': 'prodKeluar', opname: 'opname' };
+function hppPeriode(R, a, b) {
+  const kos = () => ({ awal: 0, beli: 0, awalDicatat: 0, prodMasuk: 0, jual: 0, prodKeluar: 0, opname: 0, akhir: 0 });
+  const kat = { dagang: kos(), bahan: kos(), jadi: kos() };
+  ((R && R.rows) || []).forEach(r => {
+    const ym = r.tgl.slice(0, 7), k = kat[r.jenis] || kat.dagang;
+    if (ym < a) k.awal += r.dn; else if (ym <= b) k[HPP_TIPE_KOLOM[r.tipe]] += r.dn;
+  });
+  const jml = (x, y) => { const o = kos(); Object.keys(o).forEach(k => { o[k] = x[k] + y[k]; }); return o; };
+  Object.keys(kat).forEach(j => { const k = kat[j]; k.akhir = k.awal + k.beli + k.awalDicatat + k.prodMasuk + k.jual + k.prodKeluar + k.opname; });
+  const produk = jml(kat.dagang, kat.jadi), bahan = kat.bahan;
+  const prod = { bahan: 0, tkl: 0, bop: 0, total: 0, n: 0 };
+  ((R && R.produksi) || []).forEach(p => { const ym = p.tgl.slice(0, 7); if (ym >= a && ym <= b) { prod.bahan += p.bahan; prod.tkl += p.tkl; prod.bop += p.bop; prod.total += p.total; prod.n++; } });
+  // HPP = persediaan awal + masuk - persediaan akhir (sudah termasuk selisih opname)
+  const hpp = produk.awal + produk.beli + produk.awalDicatat + produk.prodMasuk - produk.akhir;
+  return { kat, produk, bahan, prod, hpp };
+}
+// baris laporan dalam format yang sama dengan laporan lain, supaya tampilan dan ekspor bisa dipakai bersama
+function hppLines(R, cols, M) {
+  const P = cols.map(c => hppPeriode(R, c.a, c.b));
+  const L = [], v = f => P.map(f);
+  const adaProd = P.some(p => p.prod.n > 0 || Math.abs(p.bahan.awal) + Math.abs(p.bahan.beli) + Math.abs(p.bahan.akhir) > 0.5);
+  if (adaProd) {
+    L.push({ t: 'h', text: 'Harga Pokok Produksi' });
+    L.push({ t: 'a', text: 'Persediaan bahan baku awal', v: v(p => p.bahan.awal) });
+    L.push({ t: 'a', text: 'Pembelian bahan baku', v: v(p => p.bahan.beli + p.bahan.awalDicatat) });
+    L.push({ t: 'a', text: 'Selisih stok opname bahan baku', v: v(p => p.bahan.opname) });
+    L.push({ t: 'a', text: 'Persediaan bahan baku akhir', v: v(p => -p.bahan.akhir) });
+    L.push({ t: 'tot', text: 'Bahan baku terpakai', v: v(p => p.bahan.awal + p.bahan.beli + p.bahan.awalDicatat + p.bahan.opname - p.bahan.akhir) });
+    L.push({ t: 'a', text: 'Tenaga kerja langsung', v: v(p => p.prod.tkl) });
+    L.push({ t: 'a', text: 'Biaya overhead produksi', v: v(p => p.prod.bop) });
+    L.push({ t: 'grand', text: 'Harga Pokok Produksi', v: v(p => p.prod.total) });
+  }
+  L.push({ t: 'h', text: 'Harga Pokok Penjualan' });
+  L.push({ t: 'a', text: adaProd ? 'Persediaan barang jadi dan dagang awal' : 'Persediaan awal', v: v(p => p.produk.awal) });
+  L.push({ t: 'a', text: 'Pembelian barang', v: v(p => p.produk.beli) });
+  if (P.some(p => Math.abs(p.produk.awalDicatat) > 0.5)) L.push({ t: 'a', text: 'Stok awal yang dicatat dalam periode', v: v(p => p.produk.awalDicatat) });
+  if (adaProd) L.push({ t: 'a', text: 'Harga pokok produksi barang jadi', v: v(p => p.produk.prodMasuk) });
+  L.push({ t: 'tot', text: 'Barang tersedia untuk dijual', v: v(p => p.produk.awal + p.produk.beli + p.produk.awalDicatat + p.produk.prodMasuk) });
+  L.push({ t: 'a', text: adaProd ? 'Persediaan barang jadi dan dagang akhir' : 'Persediaan akhir', v: v(p => -p.produk.akhir) });
+  L.push({ t: 'final', text: 'Harga Pokok Penjualan', v: v(p => p.hpp) });
+  if (M && R) {
+    const akun = [R.akunHpp, R.akunSel];
+    L.push({ t: 'cek', text: 'Selisih dengan akun HPP otomatis di buku besar', v: cols.map((c, i) => akun.reduce((s, k) => s + (M.am[k] ? M.mutT(k, c.a, c.b) : 0), 0) - P[i].hpp) });
+  }
+  return { lines: L, P };
+}
+
+/* ----- laba kotor per proyek atau pekerjaan (usaha jasa) ----- */
+function hppProyek(J, am, H) {
+  const out = {};
+  Object.keys((H && H.proyek) || {}).forEach(id => { out[id] = { id, nama: H.proyek[id].nama, pendapatan: 0, hpp: 0, beban: 0, n: 0 }; });
+  (J || []).forEach(j => {
+    const p = j.prj && out[j.prj]; if (!p) return;
+    let ada = false;
+    (j.baris || []).forEach(b => {
+      const a = am[b.akun]; if (!a) return;
+      if (a.tipe === 'pendapatan' || a.tipe === 'pendapatan_lain') { p.pendapatan += (b.k || 0) - (b.d || 0); ada = true; }
+      else if (a.tipe === 'hpp') { p.hpp += (b.d || 0) - (b.k || 0); ada = true; }
+      else if (a.tipe === 'beban' || a.tipe === 'beban_lain') { p.beban += (b.d || 0) - (b.k || 0); ada = true; }
+    });
+    if (ada) p.n++;
+  });
+  Object.keys(out).forEach(id => {
+    const p = out[id], kon = +H.proyek[id].kontrak || 0;
+    p.biaya = p.hpp + p.beban; p.laba = p.pendapatan - p.biaya;
+    p.margin = p.pendapatan ? p.laba / p.pendapatan : NaN; p.kontrak = kon; p.tertagih = kon ? p.pendapatan / kon : NaN;
+  });
+  return out;
+}
+
+/* ----- catatan yang perlu dilengkapi dengan rincian barang ----- */
+function hppBelumRinci(M, cfg) {
+  const H = cfg && cfg.hpp, out = { beli: [], jual: [], selisih: [] };
+  if (!H || !H.aktif) return out;
+  const pers = H.akunPers || '1-1400', jual = new Set(H.akunJual || ['4-1000']), mulai = H.mulai || '';
+  const nilaiMasuk = lines => (lines || []).reduce((s, l) => s + (l.q > 0 ? hppNilaiMasuk(l) : 0), 0);
+  const cek = (kind, id, tgl, ket, pihak, arah, jml, stk) => {
+    if (tgl < mulai) return;
+    const it = { kind, id, tgl, ket, pihak, arah, jml };
+    if (!stk || !stk.length) { (arah === 'beli' ? out.beli : out.jual).push(it); return; }
+    if (arah === 'beli' && Math.abs(nilaiMasuk(stk) - jml) > 1) { it.nilaiStok = nilaiMasuk(stk); out.selisih.push(it); }
+  };
+  M.txAll.forEach(t => {
+    if (t.jenis === 'keluar' && t.lawan === pers) cek('tx', t.id, t.tgl, t.ket || '', '', 'beli', t.jml, t.stk);
+    else if (t.jenis === 'masuk' && jual.has(t.lawan)) cek('tx', t.id, t.tgl, t.ket || '', '', 'jual', t.jml, t.stk);
+  });
+  Object.keys(M.jrById).forEach(id => {
+    const j = M.jrById[id], v = j.inv; if (!v || j.hs) return;
+    if (v.jenis === 'beli' && v.akun === pers) cek('jr', id, j.tgl, j.ket || '', v.pihak || '', 'beli', Math.round(v.dpp || 0), j.stk);
+    else if (v.jenis === 'jual' && jual.has(v.akun)) cek('jr', id, j.tgl, j.ket || '', v.pihak || '', 'jual', Math.round(v.dpp || 0), j.stk);
+  });
+  Object.keys(out).forEach(k => out[k].sort((a, b) => (a.tgl < b.tgl ? 1 : a.tgl > b.tgl ? -1 : 0)));
+  return out;
+}
+
+/* ----- kalkulator HPP produk (resep) -----
+   r: { hasil, komp: [{ b?, nama, q, h? }], tkl, bop, bopPct, susut, margin }; hargaFn(b) = HPP rata-rata saat ini */
+function hppResep(r, hargaFn) {
+  const komp = (r.komp || []).map(k => {
+    const manual = k.h != null && k.h !== '' && +k.h > 0;
+    const h = manual ? +k.h : (k.b && hargaFn ? +hargaFn(k.b) || 0 : 0);
+    return Object.assign({}, k, { h, dariStok: !manual && !!k.b, n: Math.round((+k.q || 0) * h) });
+  });
+  const bahan0 = komp.reduce((s, k) => s + k.n, 0);
+  const sus = Math.min(Math.max(+r.susut || 0, 0), 90) / 100;
+  const bahan = sus ? Math.round(bahan0 / (1 - sus)) : bahan0;
+  const tkl = hppRp(r.tkl), bop = hppRp(r.bop) + Math.round(bahan * (Math.max(+r.bopPct || 0, 0) / 100));
+  const total = bahan + tkl + bop, hasil = +r.hasil || 0, perUnit = hasil > 0 ? total / hasil : 0;
+  const m = Math.min(Math.max(+r.margin || 0, 0), 95) / 100, jual = perUnit / (1 - m);
+  return { komp, bahan0, susutBiaya: bahan - bahan0, bahan, tkl, bop, total, hasil, perUnit, jual, laba: jual - perUnit, margin: m, tanpaHarga: komp.filter(k => !(k.h > 0)).length };
 }
 
 
@@ -1763,6 +2039,7 @@ const IC = {
   naik: '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1.5 9 8H1z" fill="currentColor"/></svg>',
   turun: '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 8.5 1 2h8z" fill="currentColor"/></svg>',
   invoice: svgI('<path d="M6 3h12v18l-3-2-3 2-3-2-3 2z"/><path d="M9 8h6M9 12h6"/>'),
+  hpp: svgI('<path d="M4 8l8-4 8 4v8l-8 4-8-4z"/><path d="M4 8l8 4 8-4M12 12v8"/>'),
   tutup: svgI('<path d="M6 6l12 12M18 6 6 18"/>', 18),
   plus: svgI('<path d="M12 5v14M5 12h14"/>', 16),
   unduh: svgI('<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>', 16),
@@ -1771,6 +2048,7 @@ const PAGES = [
   { id: 'ringkasan', t: 'Ringkasan', ic: 'ringkasan' },
   { id: 'kas-bank', t: 'Kas & Bank', ic: 'kas' },
   { id: 'invoice', t: 'Invoice', ic: 'invoice' },
+  { id: 'hpp', t: 'HPP & Persediaan', ic: 'hpp' },
   { id: 'jurnal', t: 'Jurnal & Buku Besar', ic: 'jurnal' },
   { sep: 1 },
   { id: 'laporan', t: 'Laporan Keuangan', ic: 'laporan' },
@@ -1780,7 +2058,7 @@ const PAGES = [
   { sep: 1 },
   { id: 'pengaturan', t: 'Pengaturan', ic: 'setelan' },
 ];
-const APP_VERSI = '4d57f65629';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
+const APP_VERSI = '0a6e5a55f3';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
 const versiNyata = () => APP_VERSI.charAt(0) !== '_';
 const sptDilihat = () => { try { return localStorage.getItem('pembukuan.spt.dilihat') === '1'; } catch (e) { return true; } };
 const sptTandaiDilihat = () => { try { localStorage.setItem('pembukuan.spt.dilihat', '1'); } catch (e) { /* abaikan */ } };
@@ -1789,6 +2067,7 @@ const UI = {
   page: 'ringkasan', tahun: new Date().getFullYear(), tahunSet: false,
   kas: { rek: '', bln: '', jenis: '', q: '', lim: 100 },
   invoice: { tab: 'daftar', jenis: '', status: '', q: '' },
+  hpp: { tab: 'stok', q: '', jenis: '', lap: 'banding' },
   jurnal: { tab: 'umum', bln: '', sumber: '', akun: '', q: '', lim: 60 },
   lap: { tab: 'lr', periode: 'tahun', tampil: 'banding' },
   set: { tab: 'profil' },
@@ -1893,7 +2172,7 @@ function render() {
   const teksIsi = f && f.tagName === 'INPUT' && /^(text|search|tel|url|email|number)?$/.test(f.type || '') || (f && f.tagName === 'TEXTAREA');
   const fokus = f && f.id && app.contains(f) ? { id: f.id, a: f.selectionStart, b: f.selectionEnd, v: teksIsi ? f.value : null } : null;
   const sy = window.scrollY;
-  const views = { ringkasan: vRingkasan, 'kas-bank': vKas, invoice: vInvoice, jurnal: vJurnal, laporan: vLaporan, rekap: vRekap, tahunan: vTahunan, spt: vSpt, pengaturan: vPengaturan };
+  const views = { ringkasan: vRingkasan, 'kas-bank': vKas, invoice: vInvoice, hpp: vHpp, jurnal: vJurnal, laporan: vLaporan, rekap: vRekap, tahunan: vTahunan, spt: vSpt, pengaturan: vPengaturan };
   if (!views[UI.page]) UI.page = 'ringkasan';
   app.innerHTML = kerangka(bannerDemo() + views[UI.page]());
   setelahRender.forEach(fn => { try { fn(); } catch (e) { console.error(e); } });
@@ -2081,7 +2360,9 @@ function bukaTx(id, preset) {
     '<div class="fld"><label class="lbl" for="f-akun" id="lb-akun">Rekening</label><select class="in" id="f-akun" data-act-change="txAkun">' + M.kasAkun.map(a => opt(a.kode, a.nama, t.akun)).join('') + '</select></div>' +
     '<div class="fld"><label class="lbl" for="f-lawan" id="lb-lawan">Akun lawan</label><select class="in" id="f-lawan"></select></div>' +
     '<div class="fld span2"><label class="lbl" for="f-ket">Keterangan</label><input class="in" id="f-ket" value="' + esc(t.ket || '') + '" placeholder="mis. Pembayaran listrik PLN Oktober" autocomplete="off"><div class="hint" id="f-hint"></div></div>' +
-    '<div class="fld"><label class="lbl" for="f-jml">Jumlah (Rp)</label><input class="in num-in uang" id="f-jml" inputmode="numeric" value="' + (t.jml ? fmtN.format(t.jml) : '') + '" placeholder="0" autocomplete="off"></div></div>' +
+    '<div class="fld"><label class="lbl" for="f-jml">Jumlah (Rp)</label><input class="in num-in uang" id="f-jml" inputmode="numeric" value="' + (t.jml ? fmtN.format(t.jml) : '') + '" placeholder="0" autocomplete="off"></div>' +
+    (M.cfg.hpp && M.cfg.hpp.aktif && Object.keys(M.cfg.hpp.proyek || {}).length ? '<div class="fld"><label class="lbl" for="f-prj">Proyek <span class="muted">(opsional)</span></label><select class="in" id="f-prj"><option value="">Tanpa proyek</option>' + Object.keys(M.cfg.hpp.proyek).map(k => opt(k, M.cfg.hpp.proyek[k].nama, t.prj || '')).join('') + '</select></div>' : '') +
+    (ada && ada.stk && ada.stk.length ? '<div class="fld span2 note">Transaksi ini punya rincian barang (' + ada.stk.length + ' baris). Rinciannya tetap tersimpan; ubah lewat menu HPP &amp; Persediaan &rsaquo; Catatan stok.</div>' : '') + '</div>' +
     '<div class="hint neg" id="f-err" role="alert"></div>';
   const tombol = (ada ? '<button class="btn bahaya" data-act="hapusTx" id="f-hapus">Hapus</button><span class="sp"></span>' : '') +
     '<button class="btn" data-act="tutupModal">Batal</button>' + (ada ? '' : '<button class="btn" data-act="simpanTx" data-lagi="1">Simpan dan tambah lagi</button>') + '<button class="btn pri" data-act="simpanTx">Simpan</button>';
@@ -2121,6 +2402,9 @@ function simpanTx(lagi) {
   const item = { id: T.id || uid(), tgl, jenis: T.jenis, akun, lawan, ket, jml, ref };
   const lama = T.id && M.txById[T.id];
   if (lama && lama.inv && (lawan === INV_AKUN.piutang[0] || lawan === INV_AKUN.utang[0])) item.inv = lama.inv;   // tetap terhubung ke invoice
+  const prjEl = $('#f-prj'), prj = prjEl ? prjEl.value : (lama && lama.prj) || '';
+  if (prj) item.prj = prj;
+  if (lama && lama.stk) item.stk = lama.stk;   // rincian barang (fitur HPP) ikut tersimpan
   if (!Store.simpanTx(item)) return;
   const th = +tgl.slice(0, 4);
   if (th !== UI.tahun) { UI.tahun = th; toast('Transaksi dicatat di tahun ' + th + '. Tampilan pindah ke tahun itu.'); } else toast(T.id ? 'Transaksi diperbarui.' : 'Transaksi dicatat.');
@@ -2784,7 +3068,7 @@ const ACTC_SYNC = {
 
 /* ===== ui2.js ===== */
 /* ================= Jurnal & Buku Besar ================= */
-const sumberChip = (s, inv) => (inv ? '<span class="chip acc">Invoice</span>' : s === 'kas' ? '<span class="chip acc">Kas &amp; Bank</span>' : s === 'manual' ? '<span class="chip warn">Manual</span>' : '<span class="chip">Saldo awal</span>');
+const sumberChip = (s, inv) => (s === 'hpp' ? '<span class="chip ok">HPP otomatis</span>' : inv ? '<span class="chip acc">Invoice</span>' : s === 'kas' ? '<span class="chip acc">Kas &amp; Bank</span>' : s === 'manual' ? '<span class="chip warn">Manual</span>' : '<span class="chip">Saldo awal</span>');
 const tabsHtml = (items, aktif, act) => '<div class="tabs" role="tablist">' + items.map(([id, t]) => '<button role="tab" aria-selected="' + (aktif === id) + '" data-act="' + act + '" data-t="' + id + '">' + t + '</button>').join('') + '</div>';
 
 function vJurnal() {
@@ -2800,14 +3084,14 @@ function vJurnal() {
   if (f.q) { const q = f.q.toLowerCase(); js = js.filter(j => ((j.ket || '') + ' ' + (j.ref || '') + ' ' + j.baris.map(b => namaAkun(b.akun)).join(' ')).toLowerCase().includes(q)); }
   js = js.slice().sort((a, b) => (a.tgl < b.tgl ? 1 : a.tgl > b.tgl ? -1 : M.jIdx[b.id] - M.jIdx[a.id]));
   h += '<div class="bar"><select class="in" id="jf-bln" data-ui="jurnal.bln" aria-label="Bulan">' + opt('', 'Semua bulan', f.bln) + BULAN.map((b, i) => opt(pad2(i + 1), b, f.bln)).join('') + '</select>' +
-    '<select class="in" id="jf-sumber" data-ui="jurnal.sumber" aria-label="Sumber jurnal">' + opt('', 'Semua sumber', f.sumber) + opt('kas', 'Kas & Bank', f.sumber) + opt('manual', 'Manual', f.sumber) + opt('saldo', 'Saldo awal', f.sumber) + '</select>' +
+    '<select class="in" id="jf-sumber" data-ui="jurnal.sumber" aria-label="Sumber jurnal">' + opt('', 'Semua sumber', f.sumber) + opt('kas', 'Kas & Bank', f.sumber) + opt('manual', 'Manual', f.sumber) + opt('saldo', 'Saldo awal', f.sumber) + opt('hpp', 'HPP otomatis', f.sumber) + '</select>' +
     '<input class="in grow" id="jf-q" data-uiq="jurnal.q" type="search" placeholder="Cari keterangan, bukti, atau nama akun" value="' + esc(f.q) + '" aria-label="Cari jurnal"></div>';
   if (!js.length) return h + '<div class="panel"><div class="empty"><b>Tidak ada jurnal</b>Belum ada jurnal pada filter ini.</div></div>';
   const tampil = js.slice(0, f.lim);
   h += '<div class="tw"><table class="t"><thead><tr><th style="width:110px">Tanggal</th><th>Akun</th><th class="r">Debit</th><th class="r">Kredit</th></tr></thead>' +
     tampil.map(j => {
       const edit = j.sumber === 'manual' && Store.canWrite ? '<button class="btn sm" data-act="editJr" data-id="' + esc(j.id) + '">Ubah</button>' : (j.sumber === 'kas' && Store.canWrite ? '<button class="btn sm ghost" data-act="editTx" data-id="' + esc(j.id) + '">Ubah</button>' : '');
-      return '<tbody><tr class="minggu"><td style="white-space:nowrap;font-weight:600">' + tglFmt(j.tgl) + '</td><td colspan="2"><span class="k1">' + esc(j.ket || '(tanpa keterangan)') + '</span> ' + (j.ref ? '<span class="muted mono" style="font-size:11.5px">' + esc(j.ref) + '</span> ' : '') + sumberChip(j.sumber, j.inv) + '</td><td class="r">' + edit + '</td></tr>' +
+      return '<tbody><tr class="minggu"><td style="white-space:nowrap;font-weight:600">' + tglFmt(j.tgl) + '</td><td colspan="2"><span class="k1">' + esc(j.ket || '(tanpa keterangan)') + '</span> ' + (j.ref ? '<span class="muted mono" style="font-size:11.5px">' + esc(j.ref) + '</span> ' : '') + sumberChip(j.sumber, j.inv) + (j.stk ? ' <span class="chip">Stok</span>' : '') + '</td><td class="r">' + edit + '</td></tr>' +
         j.baris.map(b => '<tr><td></td><td style="padding-left:' + (b.d > 0 ? 12 : 34) + 'px"><span class="kode">' + esc(b.akun) + '</span>' + esc(namaAkun(b.akun)) + '</td><td class="n">' + (b.d ? angka(b.d) : '') + '</td><td class="n">' + (b.k ? angka(b.k) : '') + '</td></tr>').join('') + '</tbody>';
     }).join('') + '</table></div>';
   if (js.length > tampil.length) h += '<div style="text-align:center;margin-top:12px"><button class="btn" data-act="lagiJurnal">Tampilkan lebih banyak (' + (js.length - tampil.length) + ' lagi)</button></div>';
@@ -3964,11 +4248,14 @@ function simpanInvoice() {
   const kurang = invAkunKurang(v, M.am);
   if (kurang.length && !Store.ubahConfig(c => { kurang.forEach(a => { if (!c.akun.some(x => x.kode === a[0])) c.akun.push({ kode: a[0], nama: a[1], tipe: a[2] }); }); }, true)) return;
   const jr = { id: INV.id || uid(), tgl, ket: ket || 'Invoice ' + (v.jenis === 'jual' ? 'penjualan ' : 'pembelian ') + (v.no ? v.no + ' · ' : '') + v.pihak, ref: v.no, baris: invBaris(v), inv: v };
+  const lamaJr = INV.id && M.jrById[INV.id];
+  if (lamaJr && lamaJr.stk) jr.stk = lamaJr.stk;   // rincian barang (fitur HPP) ikut tersimpan
+  if (lamaJr && lamaJr.prj) jr.prj = lamaJr.prj;
   if (!Store.simpanJr(jr)) return;
   const th = +tgl.slice(0, 4); if (th !== UI.tahun) UI.tahun = th;
   const q = INVQ;
   if (q) { q.ok++; invLanjutAntrian(); return; }
-  toast(INV.id ? 'Invoice diperbarui.' : 'Invoice disimpan.'); tutupModal();
+  toast(INV.id ? 'Invoice diperbarui.' + (jr.stk ? ' Bila nilainya berubah, cek rincian barangnya di menu HPP.' : '') : 'Invoice disimpan.'); tutupModal();
 }
 function invLanjutAntrian() {
   const q = INVQ; q.i++;
@@ -4073,6 +4360,652 @@ const ACTC_INV = {
   },
   invPdfFile(el) { const fs = Array.from(el.files || []); el.value = ''; if (fs.length) invProsesPdf(fs); },
 };
+
+/* ===== hpp_form.js ===== */
+/* ================= HPP: formulir (barang, pembelian/penjualan, rincian, stok awal, opname, produksi, resep, proyek) ================= */
+let HF = null;   // keadaan formulir HPP yang sedang terbuka
+const hppUang = n => (n ? fmtN.format(Math.round(n)) : '');
+const hppJml = n => String(hppQ(n)).replace('.', ',');
+const bacaDesimal = el => { const v = parseFloat(String(el && el.value != null ? el.value : '').replace(/\s/g, '').replace(',', '.')); return isFinite(v) ? v : 0; };
+const hppH = () => (M.cfg.hpp && M.cfg.hpp.aktif ? M.cfg.hpp : null);
+const hppBarang = filter => { const H = hppH(); return Object.keys(H ? H.barang : {}).map(id => Object.assign({ id }, H.barang[id])).filter(b => !filter || filter(b)).sort((a, b) => a.nama.localeCompare(b.nama, 'id')); };
+const hppSatuan = id => { const H = hppH(); return H && H.barang[id] ? H.barang[id].satuan || '' : ''; };
+const hppRata = b => { const s = M.hpp && M.hpp.st[b]; return s ? (s.q > 1e-9 ? s.n / s.q : s.avg) : 0; };
+const hppOpsiBarang = (sel, filter) => hppBarang(filter).map(b => opt(b.id, b.nama + (b.satuan ? ' (' + b.satuan + ')' : ''), sel)).join('');
+const hppBolehTulis = () => { if (!Store.canWrite) { toast('Akses Anda hanya untuk melihat.', true); return false; } if (!hppH()) { toast('Aktifkan fitur HPP dulu.', true); return false; } return true; };
+const hppAdaBarang = () => { if (!hppBarang().length) { toast('Tambahkan barang dulu di tab Stok.', true); return false; } return true; };
+function hppSetelahSimpan(tgl) { const th = +String(tgl).slice(0, 4); if (th && th !== UI.tahun) UI.tahun = th; }
+
+/* ----- editor baris barang (dipakai semua formulir) -----
+   mode: 'beli' (barang, jumlah, harga satuan), 'jual' (barang, jumlah, harga jual), 'qty' (barang, jumlah), 'komp' (komponen resep) */
+function hlHtml() {
+  const mode = HF.mode;
+  const filter = mode === 'jual' ? b => b.jenis !== 'bahan' : null;
+  return HF.lines.map((l, i) => {
+    const manual = mode === 'komp' && l.m;
+    const sel = '<select class="in" id="hl-b-' + i + '" data-act-change="hlGanti" data-i="' + i + '" aria-label="Barang baris ' + (i + 1) + '"><option value="">Pilih barang…</option>' + hppOpsiBarang(l.b, filter) + (mode === 'komp' ? '<option value="-"' + (manual ? ' selected' : '') + '>Lainnya (isi nama sendiri)</option>' : '') + '</select>' +
+      (manual ? '<input class="in" id="hl-n-' + i + '" value="' + esc(l.nama || '') + '" placeholder="Nama komponen" autocomplete="off" style="margin-top:6px">' : '');
+    const sat = l.b ? hppSatuan(l.b) : '';
+    const q = '<input class="in" id="hl-q-' + i + '" data-hl="q" inputmode="decimal" value="' + (l.q === '' || l.q == null ? '' : esc(hppJml(l.q))) + '" placeholder="Jumlah' + (sat ? ' (' + esc(sat) + ')' : '') + '" autocomplete="off" aria-label="Jumlah baris ' + (i + 1) + '">';
+    const h = mode === 'qty' ? '' : '<input class="in num-in uang" id="hl-h-' + i + '" data-hl="h" inputmode="numeric" value="' + hppUang(l.h) + '" placeholder="' + (mode === 'komp' ? (l.b ? 'Rp ' + fmtN.format(Math.round(hppRata(l.b))) + ' (stok)' : 'Harga satuan') : mode === 'jual' ? 'Harga jual satuan' : 'Harga satuan') + '" autocomplete="off" aria-label="Harga baris ' + (i + 1) + '">';
+    return '<div class="hl' + (mode === 'qty' ? ' hl-qty' : '') + '"><div class="hl-b">' + sel + '</div><div class="hl-q">' + q + '</div>' + (h ? '<div class="hl-h">' + h + '</div>' : '') +
+      '<button type="button" class="btn sm ghost hl-x" data-act="hlHapus" data-i="' + i + '" aria-label="Hapus baris ' + (i + 1) + '">' + IC.tutup + '</button></div>';
+  }).join('') + '<button type="button" class="btn sm" data-act="hlTambah">' + IC.plus + ' Tambah baris</button>';
+}
+function hlBaca() {
+  const g = id => document.getElementById(id);
+  HF.lines = HF.lines.map((l, i) => {
+    const sb = g('hl-b-' + i); if (!sb) return l;
+    const o = { b: sb.value === '-' ? '' : sb.value };
+    if (HF.mode === 'komp') { o.m = sb.value === '-'; if (o.m) o.nama = g('hl-n-' + i) ? g('hl-n-' + i).value.trim() : (l.nama || ''); }
+    const q = g('hl-q-' + i); o.q = q && q.value.trim() !== '' ? bacaDesimal(q) : '';
+    const h = g('hl-h-' + i); o.h = h ? (h.value.trim() === '' ? '' : bacaUang(h)) : '';
+    return o;
+  });
+}
+function hlGambar() { const bx = $('#hl-box'); if (bx) bx.innerHTML = hlHtml(); hlLive(); }
+function hlLive() { hlBaca(); if (HF && HF.sum) HF.sum(); }
+// baris yang terisi; kembalikan { lines, err }
+function hlAmbil(opsi) {
+  hlBaca(); opsi = opsi || {};
+  const out = [];
+  for (let i = 0; i < HF.lines.length; i++) {
+    const l = HF.lines[i];
+    if (!l.b && !(l.q > 0) && !(l.h > 0) && !(l.nama)) continue;
+    if (HF.mode === 'komp') { if (!l.b && !l.nama) return { err: 'Baris ' + (i + 1) + ': pilih barang atau isi nama komponen.' }; }
+    else if (!l.b) return { err: 'Baris ' + (i + 1) + ': pilih barang.' };
+    if (!(l.q > 0)) return { err: 'Baris ' + (i + 1) + ': isi jumlah lebih dari nol.' };
+    if (opsi.harga && !(l.h > 0)) return { err: 'Baris ' + (i + 1) + ': isi harga satuan.' };
+    out.push(l);
+  }
+  if (!out.length && !opsi.boleh0) return { err: 'Isi minimal satu baris barang.' };
+  return { lines: out };
+}
+
+/* ----- aktifkan ----- */
+function bukaAktif() {
+  if (!Store.canWrite) { toast('Akses Anda hanya untuk melihat.', true); return; }
+  const lama = M.cfg.hpp;
+  bukaModal({
+    judul: 'Aktifkan HPP & Persediaan', tanpaFokus: true,
+    isi: '<div class="fld"><label class="lbl" for="ha-mulai">Mulai melacak stok dari tanggal</label><input class="in" id="ha-mulai" type="date" value="' + esc(lama && lama.mulai ? lama.mulai : hariIni().slice(0, 8) + '01') + '"></div>' +
+      '<p class="note" style="margin-top:10px">Transaksi sebelum tanggal ini tidak berubah dan tidak diminta rincian barangnya. Aplikasi menambahkan dua akun: <b>5-1100 Harga Pokok Penjualan (Otomatis)</b> dan <b>5-1200 Selisih Persediaan</b>. Pembelian yang sudah kamu catat sebagai biaya (akun 5-1000) tetap apa adanya.</p>' +
+      '<div class="hint neg" id="ha-err" role="alert"></div>',
+    tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppAktifSimpan">Aktifkan</button>',
+  });
+}
+function hppAktifSimpan() {
+  const mulai = $('#ha-mulai').value;
+  if (!tglValid(mulai)) { $('#ha-err').textContent = 'Isi tanggal dengan benar.'; return; }
+  if (!Store.ubahConfig(c => {
+    if (!c.hpp) c.hpp = hppCfgBaru(mulai); else { c.hpp.aktif = true; c.hpp.mulai = mulai; }
+    hppAkunKurang(c).forEach(a => c.akun.push({ kode: a[0], nama: a[1], tipe: a[2] }));
+  })) return;
+  UI.hpp.tab = 'stok'; tutupModal(); toast('HPP & Persediaan aktif. Tambahkan barang untuk mulai.');
+}
+
+/* ----- barang ----- */
+function bukaBarang(id) {
+  if (!hppBolehTulis()) return;
+  const b = id ? M.cfg.hpp.barang[id] : null, pakai = id && ((M.hpp.kartu[id] || []).length || Object.keys(M.cfg.hpp.resep || {}).some(r => (M.cfg.hpp.resep[r].komp || []).some(k => k.b === id) || M.cfg.hpp.resep[r].barang === id));
+  HF = { f: 'barang', id: id || null, pakai: !!pakai };
+  const v = b || { nama: '', kode: '', satuan: 'pcs', jenis: 'dagang', jual: 0, min: 0 };
+  bukaModal({
+    judul: id ? 'Ubah barang' : 'Tambah barang', tanpaFokus: true,
+    isi: '<div class="grid2"><div class="fld span2"><label class="lbl" for="br-nama">Nama barang</label><input class="in" id="br-nama" value="' + esc(v.nama) + '" placeholder="mis. Kopi arabika 1 kg" autocomplete="off"></div>' +
+      '<div class="fld"><label class="lbl" for="br-kode">Kode <span class="muted">(opsional)</span></label><input class="in" id="br-kode" value="' + esc(v.kode || '') + '" autocomplete="off"></div>' +
+      '<div class="fld"><label class="lbl" for="br-sat">Satuan</label><input class="in" id="br-sat" value="' + esc(v.satuan || '') + '" placeholder="pcs, kg, liter" autocomplete="off"></div>' +
+      '<div class="fld span2"><label class="lbl" for="br-jenis">Jenis</label><select class="in" id="br-jenis">' + Object.keys(HPP_JENIS).map(k => opt(k, HPP_JENIS[k], v.jenis)).join('') + '</select></div>' +
+      '<div class="fld"><label class="lbl" for="br-jual">Harga jual satuan <span class="muted">(opsional)</span></label><input class="in num-in uang" id="br-jual" inputmode="numeric" value="' + hppUang(v.jual) + '" autocomplete="off"></div>' +
+      '<div class="fld"><label class="lbl" for="br-min">Stok minimal <span class="muted">(opsional)</span></label><input class="in" id="br-min" inputmode="decimal" value="' + (v.min ? esc(hppJml(v.min)) : '') + '" autocomplete="off"></div></div>' +
+      '<p class="note" style="margin-top:8px">Bahan baku dipakai di produksi, barang jadi adalah hasil produksi, barang dagang dibeli lalu dijual. Stok dan HPP diisi lewat pembelian, penjualan, stok awal, atau produksi.</p><div class="hint neg" id="br-err" role="alert"></div>',
+    tombol: (id ? '<button class="btn bahaya" data-act="hppBarangHapus">Hapus</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppBarangSimpan">Simpan</button>',
+  });
+}
+function hppBarangSimpan() {
+  const nama = $('#br-nama').value.trim(), err = $('#br-err');
+  if (!nama) { err.textContent = 'Isi nama barang.'; return; }
+  if (hppBarang(b => b.id !== HF.id && b.nama.toLowerCase() === nama.toLowerCase()).length) { err.textContent = 'Sudah ada barang dengan nama itu.'; return; }
+  const o = { nama, kode: $('#br-kode').value.trim(), satuan: $('#br-sat').value.trim() || 'pcs', jenis: $('#br-jenis').value, jual: bacaUang($('#br-jual')), min: bacaDesimal($('#br-min')) };
+  const id = HF.id || uid();
+  if (!Store.ubahConfig(c => { c.hpp.barang[id] = o; })) return;
+  toast(HF.id ? 'Barang diperbarui.' : 'Barang ditambahkan.'); tutupModal();
+}
+function hppBarangHapus(el) {
+  two(el, () => {
+    if (HF.pakai) { toast('Barang ini sudah punya catatan stok atau dipakai di resep, jadi tidak bisa dihapus.', true); return; }
+    if (Store.ubahConfig(c => { delete c.hpp.barang[HF.id]; })) { toast('Barang dihapus.'); tutupModal(); }
+  });
+}
+
+/* ----- pembelian dan penjualan barang (dibuat sebagai invoice, bisa langsung dilunasi) ----- */
+function bukaBJ(jenis) {
+  if (!hppBolehTulis() || !hppAdaBarang()) return;
+  const H = M.cfg.hpp, j = jenis === 'jual';
+  HF = { f: 'bj', jenis, mode: j ? 'jual' : 'beli', lines: [{ b: '', q: '', h: '' }], sum: bjSum };
+  const pihakLama = Array.from(new Set(invSemua(M, hariIni()).filter(i => i.jenis === jenis && i.pihak).map(i => i.pihak)));
+  const akunJual = (H.akunJual || ['4-1000']).filter(k => M.am[k])[0] || invAkunDefault('jual');
+  const seg = ['beli', 'jual'].map(k => '<button type="button" data-act="hppBJJenis" data-j="' + k + '" aria-pressed="' + (k === jenis) + '">' + (k === 'jual' ? 'Penjualan barang' : 'Pembelian barang') + '</button>').join('');
+  bukaModal({
+    judul: j ? 'Penjualan barang' : 'Pembelian barang', lebar: true, tanpaFokus: true,
+    isi: '<div class="seg full" role="group" aria-label="Jenis">' + seg + '</div>' +
+      '<div class="grid2" style="margin-top:12px"><div class="fld"><label class="lbl" for="bj-tgl">Tanggal</label><input class="in" id="bj-tgl" type="date" value="' + esc(tglDefault()) + '"></div>' +
+      '<div class="fld"><label class="lbl" for="bj-no">Nomor <span class="muted">(opsional)</span></label><input class="in" id="bj-no" placeholder="mis. INV-2611-01" autocomplete="off"></div>' +
+      '<div class="fld span2"><label class="lbl" for="bj-pihak">' + (j ? 'Pelanggan' : 'Pemasok') + '</label><input class="in" id="bj-pihak" list="bj-pihak-list" placeholder="Nama perusahaan atau orang" autocomplete="off"><datalist id="bj-pihak-list">' + pihakLama.map(p => '<option value="' + esc(p) + '">').join('') + '</datalist></div></div>' +
+      '<div class="lbl" style="margin:14px 0 6px">Barang</div><div id="hl-box">' + hlHtml() + '</div><div class="sum" id="hl-sum" style="margin:10px 0 0"></div>' +
+      '<div class="grid2" style="margin-top:12px"><div class="fld"><label class="lbl" for="bj-ppn">PPN</label><select class="in" id="bj-ppn" data-act-change="hlLive">' + opt('tanpa', 'Tanpa PPN', 'tanpa') + opt('11', 'PPN 11%', 'tanpa') + opt('12', 'PPN 12%', 'tanpa') + '</select></div>' +
+      (j ? '<div class="fld"><label class="lbl" for="bj-akun">Akun pendapatan</label><select class="in" id="bj-akun">' + optAkunGrup(a => !a.kas && (a.tipe === 'pendapatan' || a.tipe === 'pendapatan_lain') && !(INV_AKUN.piutang[0] === a.kode), akunJual) + '</select></div>' : '<div class="fld"><label class="lbl" for="bj-tempo">Jatuh tempo <span class="muted">(opsional)</span></label><input class="in" id="bj-tempo" type="date"></div>') +
+      '<div class="fld span2"><label class="lbl" for="bj-bayar">Pembayaran</label><select class="in" id="bj-bayar"><option value="">Belum ' + (j ? 'diterima (jadi piutang)' : 'dibayar (jadi utang)') + '</option>' + M.kasAkun.map(a => '<option value="' + esc(a.kode) + '">Sudah ' + (j ? 'diterima di ' : 'dibayar dari ') + esc(a.nama) + '</option>').join('') + '</select></div></div>' +
+      '<p class="note" style="margin-top:8px">' + (j ? 'Disimpan sebagai invoice penjualan (tampil juga di menu Invoice). Harga pokok barang dihitung otomatis dengan rata-rata bergerak dan masuk jurnal sebagai HPP.' : 'Disimpan sebagai invoice pembelian yang menambah persediaan (tampil juga di menu Invoice). Pilih rekening di atas bila sudah dibayar.') + '</p><div class="hint neg" id="bj-err" role="alert"></div>',
+    tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppBJSimpan">Simpan</button>',
+  });
+  bjSum();
+}
+function bjPpnRate() { const m = ($('#bj-ppn') || {}).value; return INV_PPN[m] || 0; }
+function bjSum() {
+  const el = $('#hl-sum'); if (!el) return;
+  let dpp = 0, hpp = 0, kurang = [];
+  HF.lines.forEach(l => {
+    if (!l.b || !(l.q > 0)) return;
+    dpp += Math.round(l.q * (l.h || 0));
+    if (HF.jenis === 'jual') {
+      hpp += Math.round(l.q * hppRata(l.b));
+      const s = M.hpp && M.hpp.st[l.b]; if (!s || s.q + 1e-9 < l.q) kurang.push((M.cfg.hpp.barang[l.b] || {}).nama);
+    }
+  });
+  const ppn = Math.round(dpp * bjPpnRate());
+  el.innerHTML = '<span>Jumlah <b>' + rp(dpp) + '</b></span>' + (ppn ? '<span>PPN <b>' + rp(ppn) + '</b></span><span>Total <b>' + rp(dpp + ppn) + '</b></span>' : '') +
+    (HF.jenis === 'jual' ? '<span>Perkiraan HPP <b>' + rp(hpp) + '</b></span><span>Laba kotor <b class="' + (dpp - hpp < 0 ? 'neg' : 'pos') + '">' + rp(dpp - hpp) + '</b></span>' : '') +
+    (kurang.length ? '<span class="neg">Stok ' + esc(kurang.join(', ')) + ' kurang dari jumlah ini (stok sekarang)</span>' : '');
+}
+function hppBJSimpan() {
+  const err = $('#bj-err'), j = HF.jenis === 'jual', tgl = $('#bj-tgl').value, pihak = $('#bj-pihak').value.trim(), no = $('#bj-no').value.trim();
+  err.textContent = '';
+  if (!tglValid(tgl)) { err.textContent = 'Isi tanggal dengan benar.'; return; }
+  if (!pihak) { err.textContent = 'Isi nama ' + (j ? 'pelanggan' : 'pemasok') + '.'; $('#bj-pihak').focus(); return; }
+  const r = hlAmbil({ harga: true }); if (r.err) { err.textContent = r.err; return; }
+  const dpp = r.lines.reduce((s, l) => s + Math.round(l.q * l.h), 0), ppn = Math.round(dpp * bjPpnRate());
+  if (!(dpp > 0)) { err.textContent = 'Jumlah transaksi harus lebih dari nol.'; return; }
+  const akun = j ? $('#bj-akun').value : (M.cfg.hpp.akunPers || '1-1400');
+  if (!akun || !M.am[akun]) { err.textContent = 'Pilih akun.'; return; }
+  const tempo = j ? '' : ($('#bj-tempo').value || '');
+  if (tempo && tempo < tgl) { err.textContent = 'Jatuh tempo tidak boleh sebelum tanggal.'; return; }
+  const dup = no && invSemua(M, hariIni()).find(i => i.jenis === HF.jenis && i.no.toLowerCase() === no.toLowerCase() && i.pihak.toLowerCase() === pihak.toLowerCase());
+  if (dup) { err.textContent = 'Nomor ini untuk ' + (j ? 'pelanggan' : 'pemasok') + ' yang sama sudah tercatat (' + tglFmt(dup.tgl) + ').'; return; }
+  const v = { jenis: HF.jenis, no, pihak, tempo, akun, dpp, ppn, pph: 0, ppnMode: ppn ? ($('#bj-ppn').value) : 'tanpa' };
+  const kurang = invAkunKurang(v, M.am);
+  if (kurang.length && !Store.ubahConfig(c => { kurang.forEach(a => { if (!c.akun.some(x => x.kode === a[0])) c.akun.push({ kode: a[0], nama: a[1], tipe: a[2] }); }); }, true)) return;
+  const stk = r.lines.map(l => (j ? { b: l.b, q: -l.q, jh: l.h } : { b: l.b, q: l.q, h: l.h, n: Math.round(l.q * l.h) }));
+  const ket = (j ? 'Penjualan barang ' : 'Pembelian barang ') + (no ? no + ' · ' : '') + pihak;
+  const jr = { id: uid(), tgl, ket, ref: no, baris: invBaris(v), inv: v, stk };
+  if (!Store.simpanJr(jr)) return;
+  const bayar = $('#bj-bayar').value;
+  if (bayar && !Store.simpanTx({ id: uid(), tgl, jenis: j ? 'masuk' : 'keluar', akun: bayar, lawan: j ? INV_AKUN.piutang[0] : INV_AKUN.utang[0], ket: (j ? 'Pelunasan ' : 'Pembayaran ') + (no ? no + ' ' : '') + pihak, jml: dpp + ppn, ref: no, inv: jr.id })) return;
+  hppSetelahSimpan(tgl); toast((j ? 'Penjualan' : 'Pembelian') + ' dicatat' + (bayar ? ' dan dilunasi.' : '.')); tutupModal();
+}
+
+/* ----- rincian barang pada transaksi atau invoice yang sudah ada ----- */
+function hppInfoCatatan(kind, id) {
+  const rec = kind === 'tx' ? M.txById[id] : M.jrById[id]; if (!rec) return null;
+  let arah, nilai, judul;
+  if (kind === 'tx') { arah = rec.jenis === 'keluar' ? 'beli' : 'jual'; nilai = rec.jml; judul = rec.ket || rec.ref || 'Transaksi'; }
+  else { arah = rec.inv ? rec.inv.jenis : (rec.stk && rec.stk.some(l => l.q > 0) ? 'beli' : 'jual'); nilai = rec.inv ? Math.round(rec.inv.dpp || 0) : 0; judul = rec.ket || rec.ref || 'Invoice'; }
+  return { rec, arah, nilai, judul };
+}
+function bukaRincian(kind, id) {
+  if (!hppBolehTulis() || !hppAdaBarang()) return;
+  const info = hppInfoCatatan(kind, id); if (!info) return;
+  const lines = (info.rec.stk || []).map(l => (l.q > 0 ? { b: l.b, q: l.q, h: l.q ? Math.round((hppNilaiMasuk(l) / l.q) * 100) / 100 : '' } : { b: l.b, q: -l.q, h: l.jh || '' }));
+  HF = { f: 'rinci', kind, id, arah: info.arah, nilai: info.nilai, mode: info.arah === 'beli' ? 'beli' : 'qty', lines: lines.length ? lines : [{ b: '', q: '', h: '' }], sum: rinciSum };
+  bukaModal({
+    judul: 'Rincian barang', lebar: true, tanpaFokus: true,
+    isi: '<p class="note" style="margin-bottom:10px"><b>' + esc(info.judul) + '</b> · ' + tglFmt(info.rec.tgl) + '<br>' + (info.arah === 'beli' ? 'Pembelian barang senilai <b>' + rp(info.nilai) + '</b>. Isi barang, jumlah, dan harga satuannya supaya stok bertambah.' : 'Penjualan barang. Isi barang dan jumlah yang terjual; HPP dihitung otomatis dari harga rata-rata.') + '</p>' +
+      '<div id="hl-box">' + hlHtml() + '</div><div class="sum" id="hl-sum" style="margin:10px 0 0"></div>' +
+      (info.arah === 'beli' ? '<button type="button" class="btn sm" data-act="hppRinciSesuai" style="margin-top:8px">Sesuaikan harga ke nilai transaksi</button>' : '') +
+      '<div class="hint neg" id="rc-err" role="alert"></div>',
+    tombol: (info.rec.stk && info.rec.stk.length ? '<button class="btn bahaya" data-act="hppRinciHapus">Hapus rincian</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppRinciSimpan">Simpan</button>',
+  });
+  rinciSum();
+}
+function rinciSum() {
+  const el = $('#hl-sum'); if (!el || HF.arah !== 'beli') { if (el && HF.arah === 'jual') { let c = 0; HF.lines.forEach(l => { if (l.b && l.q > 0) c += Math.round(l.q * hppRata(l.b)); }); el.innerHTML = '<span>Perkiraan HPP <b>' + rp(c) + '</b></span>'; } return; }
+  const tot = HF.lines.reduce((s, l) => s + (l.b && l.q > 0 ? Math.round(l.q * (l.h || 0)) : 0), 0), d = tot - HF.nilai;
+  el.innerHTML = '<span>Nilai rincian <b>' + rp(tot) + '</b></span><span>Nilai transaksi <b>' + rp(HF.nilai) + '</b></span>' + (Math.abs(d) > 1 ? '<span class="neg">Selisih <b class="neg">' + rp(d) + '</b></span>' : '<span class="pos">Sama ✓</span>');
+}
+function hppRinciSesuai() {
+  hlBaca();
+  const baris = HF.lines.filter(l => l.b && l.q > 0); if (!baris.length || !(HF.nilai > 0)) return;
+  const tot = baris.reduce((s, l) => s + l.q * (l.h || 0), 0);
+  baris.forEach(l => { l.h = tot > 0 ? Math.round((l.h || 0) * HF.nilai / tot * 100) / 100 : (baris.length === 1 ? Math.round(HF.nilai / l.q * 100) / 100 : 0); });
+  hlGambar();
+}
+function hppRinciSimpan() {
+  const err = $('#rc-err'), beli = HF.arah === 'beli';
+  const r = hlAmbil({ harga: beli }); if (r.err) { err.textContent = r.err; return; }
+  let stk;
+  if (beli) {
+    stk = r.lines.map(l => ({ b: l.b, q: l.q, h: l.h, n: Math.round(l.q * l.h) }));
+    const tot = stk.reduce((s, l) => s + l.n, 0), d = HF.nilai - tot;
+    if (stk.length && Math.abs(d) <= Math.max(2, stk.length)) stk[stk.length - 1].n += d;   // selisih pembulatan masuk ke baris terakhir
+  } else stk = r.lines.map(l => ({ b: l.b, q: -l.q }));
+  const rec = Object.assign({}, HF.kind === 'tx' ? M.txById[HF.id] : M.jrById[HF.id]); rec.stk = stk;
+  if (!(HF.kind === 'tx' ? Store.simpanTx(rec) : Store.simpanJr(rec))) return;
+  toast('Rincian barang disimpan.'); tutupModal();
+}
+function hppRinciHapus(el) {
+  two(el, () => {
+    const rec = Object.assign({}, HF.kind === 'tx' ? M.txById[HF.id] : M.jrById[HF.id]); delete rec.stk;
+    if (HF.kind === 'tx' ? Store.simpanTx(rec) : Store.simpanJr(rec)) { toast('Rincian barang dihapus. Stok dan HPP-nya ikut dibatalkan.'); tutupModal(); }
+  }, 'Klik lagi untuk menghapus rincian');
+}
+
+/* ----- stok awal ----- */
+function bukaAwal(id) {
+  if (!hppBolehTulis() || !hppAdaBarang()) return;
+  const ada = id ? M.jrById[id] : null;
+  HF = { f: 'awal', id: id || null, mode: 'beli', lines: ada ? ada.stk.map(l => ({ b: l.b, q: l.q, h: l.q ? Math.round(hppNilaiMasuk(l) / l.q * 100) / 100 : '' })) : [{ b: '', q: '', h: '' }], sum: awalSum };
+  bukaModal({
+    judul: ada ? 'Ubah stok awal' : 'Stok awal', lebar: true, tanpaFokus: true,
+    isi: '<div class="fld"><label class="lbl" for="aw-tgl">Tanggal stok</label><input class="in" id="aw-tgl" type="date" value="' + esc(ada ? ada.tgl : (M.cfg.hpp.mulai || tglDefault())) + '"></div>' +
+      '<div class="lbl" style="margin:14px 0 6px">Barang yang sudah ada di gudang</div><div id="hl-box">' + hlHtml() + '</div><div class="sum" id="hl-sum" style="margin:10px 0 0"></div>' +
+      '<label style="display:flex;gap:8px;align-items:flex-start;margin-top:12px;font-size:13px"><input type="checkbox" id="aw-jr"' + (ada && ada.hs.jurnal ? ' checked' : '') + ' style="margin-top:3px"><span>Nilai stok ini <b>belum</b> ada di saldo awal Persediaan. Buatkan jurnalnya: Persediaan bertambah, Laba Ditahan bertambah. Biarkan tidak dicentang bila saldo awal Persediaan sudah mencakup stok ini.</span></label>' +
+      '<div class="hint neg" id="aw-err" role="alert"></div>',
+    tombol: (ada ? '<button class="btn bahaya" data-act="hppCatatanHapus">Hapus</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppAwalSimpan">Simpan</button>',
+  });
+  awalSum();
+}
+function awalSum() { const el = $('#hl-sum'); if (el) el.innerHTML = '<span>Nilai stok awal <b>' + rp(HF.lines.reduce((s, l) => s + (l.b && l.q > 0 ? Math.round(l.q * (l.h || 0)) : 0), 0)) + '</b></span>'; }
+function hppAwalSimpan() {
+  const err = $('#aw-err'), tgl = $('#aw-tgl').value;
+  if (!tglValid(tgl)) { err.textContent = 'Isi tanggal dengan benar.'; return; }
+  const r = hlAmbil({ harga: true }); if (r.err) { err.textContent = r.err; return; }
+  const jr = { id: HF.id || uid(), tgl, ket: 'Stok awal persediaan', ref: '', baris: [], stk: r.lines.map(l => ({ b: l.b, q: l.q, h: l.h, n: Math.round(l.q * l.h) })), hs: { k: 'awal', jurnal: $('#aw-jr').checked } };
+  if (!Store.simpanJr(jr)) return;
+  hppSetelahSimpan(tgl); toast('Stok awal disimpan.'); tutupModal();
+}
+function hppCatatanHapus(el) { two(el, () => { if (Store.hapusJr(HF.id)) { toast('Catatan stok dihapus.'); tutupModal(); } }); }
+
+/* ----- stok opname ----- */
+function bukaOpname(id) {
+  if (!hppBolehTulis() || !hppAdaBarang()) return;
+  const ada = id ? M.jrById[id] : null, fisik = {};
+  if (ada) ada.stk.forEach(l => { fisik[l.b] = l.fisik; });
+  HF = { f: 'opname', id: id || null };
+  const tgl = ada ? ada.tgl : tglDefault();
+  bukaModal({
+    judul: ada ? 'Ubah stok opname' : 'Stok opname', lebar: true, tanpaFokus: true,
+    isi: '<div class="fld"><label class="lbl" for="op-tgl">Tanggal penghitungan</label><input class="in" id="op-tgl" type="date" value="' + esc(tgl) + '" data-act-change="hppOpTgl"></div>' +
+      '<p class="note" style="margin:10px 0">Isi jumlah hasil hitung fisik. Kosongkan barang yang tidak dihitung. Selisih dengan stok di sistem dicatat otomatis sebagai Selisih Persediaan di HPP.</p>' +
+      '<div class="tw"><table class="t"><thead><tr><th>Barang</th><th class="r">Stok sistem</th><th class="r">Stok fisik</th></tr></thead><tbody>' + hppBarang().map(b =>
+        '<tr><td><div class="k1">' + esc(b.nama) + '</div><div class="k2">' + esc(b.satuan || '') + '</div></td><td class="n" id="op-s-' + esc(b.id) + '">' + hppJml(hppStokPer(M.hpp, b.id, tgl, id)) + '</td><td class="r"><input class="in" style="width:96px;text-align:right" data-opb="' + esc(b.id) + '" inputmode="decimal" value="' + (fisik[b.id] != null ? esc(hppJml(fisik[b.id])) : '') + '" aria-label="Stok fisik ' + esc(b.nama) + '" autocomplete="off"></td></tr>').join('') + '</tbody></table></div>' +
+      '<div class="hint neg" id="op-err" role="alert"></div>',
+    tombol: (ada ? '<button class="btn bahaya" data-act="hppCatatanHapus">Hapus</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppOpnameSimpan">Simpan</button>',
+  });
+}
+function hppOpTgl() { const tgl = $('#op-tgl').value; if (!tglValid(tgl)) return; hppBarang().forEach(b => { const e = document.getElementById('op-s-' + b.id); if (e) e.textContent = hppJml(hppStokPer(M.hpp, b.id, tgl, HF.id)); }); }
+function hppOpnameSimpan() {
+  const err = $('#op-err'), tgl = $('#op-tgl').value;
+  if (!tglValid(tgl)) { err.textContent = 'Isi tanggal dengan benar.'; return; }
+  const lines = [];
+  document.querySelectorAll('[data-opb]').forEach(el => { if (el.value.trim() !== '') { const f = bacaDesimal(el); if (f >= 0) lines.push({ b: el.dataset.opb, fisik: f }); } });
+  if (!lines.length) { err.textContent = 'Isi stok fisik minimal satu barang.'; return; }
+  if (!Store.simpanJr({ id: HF.id || uid(), tgl, ket: 'Stok opname', ref: '', baris: [], stk: lines, hs: { k: 'opname' } })) return;
+  hppSetelahSimpan(tgl); toast('Stok opname disimpan.'); tutupModal();
+}
+
+/* ----- produksi ----- */
+const hppAkunBiaya = a => !a.kas && ['beban', 'hpp', 'beban_lain'].indexOf(a.tipe) >= 0;
+function bukaProduksi(id, resepId) {
+  if (!hppBolehTulis() || !hppAdaBarang()) return;
+  const H = M.cfg.hpp, ada = id ? M.jrById[id] : null, rs = resepId ? H.resep[resepId] : null;
+  HF = { f: 'prod', id: id || null, mode: 'qty', sum: prodSum, lines: ada ? ada.stk.map(l => ({ b: l.b, q: -l.q })) : [{ b: '', q: '' }] };
+  const hs = ada ? ada.hs : { jadi: rs ? rs.barang : '', qty: rs ? rs.hasil : '', tkl: rs ? rs.tkl : 0, tklAkun: '', bop: rs ? Math.round((rs.bop || 0)) : 0, bopAkun: '' };
+  if (rs && !ada) HF.lines = (rs.komp || []).filter(k => k.b).map(k => ({ b: k.b, q: k.q }));
+  if (!HF.lines.length) HF.lines = [{ b: '', q: '' }];
+  const defAkun = (kode) => (M.am[kode] ? kode : (M.akun.find(a => a.tipe === 'beban') || {}).kode || '');
+  bukaModal({
+    judul: ada ? 'Ubah produksi' : 'Catat produksi', lebar: true, tanpaFokus: true,
+    isi: '<div class="grid2"><div class="fld"><label class="lbl" for="pr-tgl">Tanggal</label><input class="in" id="pr-tgl" type="date" value="' + esc(ada ? ada.tgl : tglDefault()) + '"></div>' +
+      '<div class="fld"><label class="lbl" for="pr-resep">Dari resep <span class="muted">(opsional)</span></label><select class="in" id="pr-resep" data-act-change="hppProdResep"><option value="">Isi manual</option>' + Object.keys(H.resep || {}).map(k => opt(k, H.resep[k].nama, resepId || '')).join('') + '</select></div>' +
+      '<div class="fld"><label class="lbl" for="pr-jadi">Barang jadi yang dihasilkan</label><select class="in" id="pr-jadi" data-act-change="hlLive"><option value="">Pilih barang…</option>' + hppOpsiBarang(hs.jadi, b => b.jenis !== 'bahan') + '</select></div>' +
+      '<div class="fld"><label class="lbl" for="pr-qty">Jumlah hasil</label><input class="in" id="pr-qty" data-hl="x" inputmode="decimal" value="' + (hs.qty ? esc(hppJml(hs.qty)) : '') + '" autocomplete="off"></div></div>' +
+      '<div class="lbl" style="margin:14px 0 6px">Bahan yang terpakai (diambil dari stok)</div><div id="hl-box">' + hlHtml() + '</div>' +
+      '<div class="grid2" style="margin-top:12px"><div class="fld"><label class="lbl" for="pr-tkl">Tenaga kerja langsung (Rp)</label><input class="in num-in uang" id="pr-tkl" data-hl="x" inputmode="numeric" value="' + hppUang(hs.tkl) + '" autocomplete="off"></div>' +
+      '<div class="fld"><label class="lbl" for="pr-tkla">Diambil dari akun</label><select class="in" id="pr-tkla">' + optAkunGrup(hppAkunBiaya, hs.tklAkun || defAkun('6-1100')) + '</select></div>' +
+      '<div class="fld"><label class="lbl" for="pr-bop">Overhead produksi (Rp)</label><input class="in num-in uang" id="pr-bop" data-hl="x" inputmode="numeric" value="' + hppUang(hs.bop) + '" autocomplete="off"></div>' +
+      '<div class="fld"><label class="lbl" for="pr-bopa">Diambil dari akun</label><select class="in" id="pr-bopa">' + optAkunGrup(hppAkunBiaya, hs.bopAkun || defAkun('6-1300')) + '</select></div></div>' +
+      '<div class="sum" id="hl-sum" style="margin:12px 0 0"></div>' +
+      '<p class="note" style="margin-top:8px">Bahan keluar dari stok sebesar harga rata-ratanya. Tenaga kerja dan overhead yang sudah dicatat sebagai biaya <b>dipindahkan</b> dari akun yang dipilih ke persediaan barang jadi, supaya tidak terhitung dua kali. Biayanya baru menjadi HPP saat barang jadi terjual.</p><div class="hint neg" id="pr-err" role="alert"></div>',
+    tombol: (ada ? '<button class="btn bahaya" data-act="hppCatatanHapus">Hapus</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppProdSimpan">Simpan</button>',
+  });
+  prodSum();
+}
+function prodSum() {
+  const el = $('#hl-sum'); if (!el) return;
+  const bahan = HF.lines.reduce((s, l) => s + (l.b && l.q > 0 ? Math.round(l.q * hppRata(l.b)) : 0), 0), tkl = bacaUang($('#pr-tkl')), bop = bacaUang($('#pr-bop')), qty = bacaDesimal($('#pr-qty')), tot = bahan + tkl + bop;
+  el.innerHTML = '<span>Bahan (perkiraan) <b>' + rp(bahan) + '</b></span><span>Tenaga kerja <b>' + rp(tkl) + '</b></span><span>Overhead <b>' + rp(bop) + '</b></span><span>Harga pokok produksi <b>' + rp(tot) + '</b></span>' + (qty > 0 ? '<span>Per unit <b>' + rp(tot / qty) + '</b></span>' : '');
+}
+function hppProdResep() {
+  const id = $('#pr-resep').value, rs = id ? M.cfg.hpp.resep[id] : null; if (!rs) return;
+  HF.lines = (rs.komp || []).filter(k => k.b).map(k => ({ b: k.b, q: k.q })); if (!HF.lines.length) HF.lines = [{ b: '', q: '' }];
+  $('#pr-jadi').value = rs.barang || ''; $('#pr-qty').value = rs.hasil ? hppJml(rs.hasil) : '';
+  $('#pr-tkl').value = hppUang(rs.tkl); $('#pr-bop').value = hppUang(rs.bop);
+  hlGambar();
+}
+function hppProdSimpan() {
+  const err = $('#pr-err'), tgl = $('#pr-tgl').value, jadi = $('#pr-jadi').value, qty = bacaDesimal($('#pr-qty')), tkl = bacaUang($('#pr-tkl')), bop = bacaUang($('#pr-bop'));
+  if (!tglValid(tgl)) { err.textContent = 'Isi tanggal dengan benar.'; return; }
+  if (!jadi) { err.textContent = 'Pilih barang jadi yang dihasilkan.'; return; }
+  if (!(qty > 0)) { err.textContent = 'Isi jumlah hasil produksi.'; return; }
+  const r = hlAmbil({ boleh0: true }); if (r.err) { err.textContent = r.err; return; }
+  if (!r.lines.length && !(tkl > 0) && !(bop > 0)) { err.textContent = 'Isi bahan terpakai atau biaya produksinya.'; return; }
+  const jr = { id: HF.id || uid(), tgl, ket: 'Produksi ' + ((M.cfg.hpp.barang[jadi] || {}).nama || ''), ref: '', baris: [], stk: r.lines.map(l => ({ b: l.b, q: -l.q })), hs: { k: 'prod', jadi, qty, tkl, tklAkun: $('#pr-tkla').value, bop, bopAkun: $('#pr-bopa').value } };
+  if (!Store.simpanJr(jr)) return;
+  hppSetelahSimpan(tgl); toast('Produksi dicatat.'); tutupModal();
+}
+
+/* ----- resep: kalkulator HPP produk ----- */
+function bukaResep(id) {
+  if (!hppBolehTulis()) return;
+  const rs = id ? M.cfg.hpp.resep[id] : null, v = rs || { nama: '', hasil: 1, satuan: 'pcs', barang: '', komp: [], tkl: 0, bop: 0, bopPct: 0, susut: 0, margin: 30 };
+  HF = { f: 'resep', id: id || null, mode: 'komp', sum: resepSum, lines: (v.komp || []).map(k => ({ b: k.b || '', m: !k.b, nama: k.nama || '', q: k.q, h: k.h || '' })) };
+  if (!HF.lines.length) HF.lines = [{ b: '', q: '', h: '' }];
+  const nm = (k, lb, val, ph, uang) => '<div class="fld"><label class="lbl" for="rs-' + k + '">' + lb + '</label><input class="in' + (uang ? ' num-in uang' : '') + '" id="rs-' + k + '" data-hl="x" inputmode="' + (uang ? 'numeric' : 'decimal') + '" value="' + (uang ? hppUang(val) : (val ? esc(hppJml(val)) : '')) + '"' + (ph ? ' placeholder="' + ph + '"' : '') + ' autocomplete="off"></div>';
+  bukaModal({
+    judul: id ? 'Ubah resep' : 'Resep produk', lebar: true, tanpaFokus: true,
+    isi: '<div class="grid2"><div class="fld span2"><label class="lbl" for="rs-nama">Nama produk</label><input class="in" id="rs-nama" value="' + esc(v.nama) + '" placeholder="mis. Brownies kukus" autocomplete="off"></div>' +
+      nm('hasil', 'Hasil per resep (jumlah)', v.hasil, '') + '<div class="fld"><label class="lbl" for="rs-sat">Satuan hasil</label><input class="in" id="rs-sat" value="' + esc(v.satuan || '') + '" autocomplete="off"></div>' +
+      '<div class="fld span2"><label class="lbl" for="rs-barang">Barang jadi di stok <span class="muted">(opsional, untuk produksi dari resep)</span></label><select class="in" id="rs-barang"><option value="">Tidak dihubungkan</option>' + hppOpsiBarang(v.barang, b => b.jenis !== 'bahan') + '</select></div></div>' +
+      '<div class="lbl" style="margin:14px 0 6px">Bahan dan komponen</div><div id="hl-box">' + hlHtml() + '</div>' +
+      '<div class="grid2" style="margin-top:12px">' + nm('tkl', 'Tenaga kerja langsung per resep (Rp)', v.tkl, '', true) + nm('bop', 'Overhead per resep (Rp)', v.bop, '', true) +
+      nm('bopPct', 'Overhead tambahan, % dari bahan', v.bopPct, '0') + nm('susut', 'Susut atau bahan terbuang (%)', v.susut, '0') + nm('margin', 'Target margin laba kotor (%)', v.margin, '30') + '</div>' +
+      '<div id="rs-out"></div>' +
+      '<p class="note" style="margin-top:8px">Harga kosong pada bahan yang dipilih dari stok memakai HPP rata-rata stok saat ini. Harga jual saran = HPP per unit ÷ (1 − margin). Ini alat bantu hitung dan tidak mengubah jurnal.</p><div class="hint neg" id="rs-err" role="alert"></div>',
+    tombol: (id ? '<button class="btn bahaya" data-act="hppResepHapus">Hapus</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppResepSimpan">Simpan</button>',
+  });
+  resepSum();
+}
+function resepBaca() {
+  hlBaca();
+  const komp = HF.lines.filter(l => (l.b || l.nama) && l.q > 0).map(l => ({ b: l.b || '', nama: l.b ? ((M.cfg.hpp.barang[l.b] || {}).nama || '') : (l.nama || ''), q: l.q, h: l.h > 0 ? l.h : '' }));
+  return { nama: ($('#rs-nama') || {}).value, hasil: bacaDesimal($('#rs-hasil')), satuan: ($('#rs-sat') || {}).value, barang: ($('#rs-barang') || {}).value, komp, tkl: bacaUang($('#rs-tkl')), bop: bacaUang($('#rs-bop')), bopPct: bacaDesimal($('#rs-bopPct')), susut: bacaDesimal($('#rs-susut')), margin: bacaDesimal($('#rs-margin')) };
+}
+const resepHtml = (h, satuan) => '<dl class="kv" style="margin-top:12px"><dt>Bahan' + (h.susutBiaya ? ' (termasuk susut)' : '') + '</dt><dd class="n">' + rp(h.bahan) + '</dd><dt>Tenaga kerja</dt><dd class="n">' + rp(h.tkl) + '</dd><dt>Overhead</dt><dd class="n">' + rp(h.bop) + '</dd><dt><b>Total per resep</b></dt><dd class="n"><b>' + rp(h.total) + '</b></dd>' +
+  '<dt><b>HPP per ' + esc(satuan || 'unit') + '</b></dt><dd class="n"><b>' + rp(h.perUnit) + '</b></dd><dt>Harga jual saran</dt><dd class="n">' + rp(h.jual) + '</dd><dt>Laba kotor per ' + esc(satuan || 'unit') + '</dt><dd class="n">' + rp(h.laba) + '</dd></dl>' +
+  (h.tanpaHarga ? '<p class="note neg" style="margin-top:6px">' + h.tanpaHarga + ' komponen belum punya harga, jadi biayanya dihitung Rp0.</p>' : '');
+function resepSum() {
+  const r = resepBaca(), h = hppResep(r, hppRata), el = $('#rs-out');
+  if (el) el.innerHTML = resepHtml(h, r.satuan);
+}
+function hppResepSimpan() {
+  const err = $('#rs-err'), r = resepBaca();
+  if (!String(r.nama || '').trim()) { err.textContent = 'Isi nama produk.'; return; }
+  if (!(r.hasil > 0)) { err.textContent = 'Isi hasil per resep (jumlah).'; return; }
+  const o = { nama: r.nama.trim(), hasil: r.hasil, satuan: (r.satuan || '').trim() || 'pcs', barang: r.barang || '', komp: r.komp, tkl: r.tkl, bop: r.bop, bopPct: r.bopPct, susut: r.susut, margin: r.margin };
+  const id = HF.id || uid();
+  if (!Store.ubahConfig(c => { c.hpp.resep[id] = o; })) return;
+  toast('Resep disimpan.'); tutupModal();
+}
+function hppResepHapus(el) { two(el, () => { if (Store.ubahConfig(c => { delete c.hpp.resep[HF.id]; })) { toast('Resep dihapus.'); tutupModal(); } }); }
+
+/* ----- proyek ----- */
+function bukaProyek(id) {
+  if (!hppBolehTulis()) return;
+  const p = id ? M.cfg.hpp.proyek[id] : { nama: '', pihak: '', kontrak: 0, status: 'berjalan' };
+  HF = { f: 'proyek', id: id || null };
+  bukaModal({
+    judul: id ? 'Ubah proyek' : 'Proyek atau pekerjaan', tanpaFokus: true,
+    isi: '<div class="grid2"><div class="fld span2"><label class="lbl" for="pj-nama">Nama proyek</label><input class="in" id="pj-nama" value="' + esc(p.nama) + '" placeholder="mis. Pemasangan CCTV Gudang A" autocomplete="off"></div>' +
+      '<div class="fld span2"><label class="lbl" for="pj-pihak">Pelanggan <span class="muted">(opsional)</span></label><input class="in" id="pj-pihak" value="' + esc(p.pihak || '') + '" autocomplete="off"></div>' +
+      '<div class="fld"><label class="lbl" for="pj-kontrak">Nilai kontrak (Rp) <span class="muted">(opsional)</span></label><input class="in num-in uang" id="pj-kontrak" inputmode="numeric" value="' + hppUang(p.kontrak) + '" autocomplete="off"></div>' +
+      '<div class="fld"><label class="lbl" for="pj-status">Status</label><select class="in" id="pj-status">' + opt('berjalan', 'Berjalan', p.status) + opt('selesai', 'Selesai', p.status) + '</select></div></div>' +
+      '<p class="note" style="margin-top:8px">Tandai pendapatan dan biaya langsung proyek ini lewat tombol "Tautkan transaksi" di tab Proyek, atau pilih proyeknya saat mencatat transaksi.</p><div class="hint neg" id="pj-err" role="alert"></div>',
+    tombol: (id ? '<button class="btn bahaya" data-act="hppProyekHapus">Hapus</button><span class="sp"></span>' : '') + '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppProyekSimpan">Simpan</button>',
+  });
+}
+function hppProyekSimpan() {
+  const nama = $('#pj-nama').value.trim(); if (!nama) { $('#pj-err').textContent = 'Isi nama proyek.'; return; }
+  const id = HF.id || uid();
+  if (!Store.ubahConfig(c => { c.hpp.proyek[id] = { nama, pihak: $('#pj-pihak').value.trim(), kontrak: bacaUang($('#pj-kontrak')), status: $('#pj-status').value }; })) return;
+  toast('Proyek disimpan.'); tutupModal();
+}
+function hppProyekHapus(el) {
+  two(el, () => {
+    const n = M.J.filter(j => j.prj === HF.id).length;
+    if (n) { toast('Proyek ini punya ' + n + ' transaksi tertaut. Lepaskan tautannya dulu lewat "Tautkan transaksi".', true); return; }
+    if (Store.ubahConfig(c => { delete c.hpp.proyek[HF.id]; })) { toast('Proyek dihapus.'); tutupModal(); }
+  });
+}
+// transaksi dan jurnal yang bisa ditautkan: pendapatan atau biaya, belum milik proyek lain
+function hppKandidatProyek(pid) {
+  const out = [], tipeOk = a => a && ['pendapatan', 'pendapatan_lain', 'hpp', 'beban', 'beban_lain'].indexOf(a.tipe) >= 0;
+  M.txAll.forEach(t => { if (t.jenis !== 'transfer' && tipeOk(M.am[t.lawan]) && (!t.prj || t.prj === pid)) out.push({ kind: 'tx', id: t.id, tgl: t.tgl, ket: ketTx(t, M.am), jml: t.jml, arah: t.jenis, prj: t.prj || '' }); });
+  Object.keys(M.jrById).forEach(id => { const j = M.jrById[id]; if (j.hs || (j.prj && j.prj !== pid)) return; const a = (j.baris || []).filter(b => tipeOk(M.am[b.akun])); if (!a.length) return; out.push({ kind: 'jr', id, tgl: j.tgl, ket: j.ket || j.ref || '', jml: a.reduce((s, b) => s + Math.abs((b.k || 0) - (b.d || 0)), 0), arah: j.inv ? j.inv.jenis : 'jr', prj: j.prj || '' }); });
+  out.sort((a, b) => (a.tgl < b.tgl ? 1 : a.tgl > b.tgl ? -1 : 0));
+  return out;
+}
+function bukaTaut(pid) {
+  if (!hppBolehTulis()) return;
+  const H = M.cfg.hpp, ids = Object.keys(H.proyek || {}); if (!ids.length) { toast('Tambahkan proyek dulu.', true); return; }
+  pid = pid && H.proyek[pid] ? pid : ids[0];
+  HF = { f: 'taut', pid, lim: 60 }; tautMuat();
+  bukaModal({ judul: 'Tautkan transaksi ke proyek', lebar: true, tanpaFokus: true, isi: tautHtml(), tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppTautSimpan">Simpan</button>' });
+}
+function tautMuat() { HF.kand = hppKandidatProyek(HF.pid); HF.pilih = new Set(HF.kand.filter(k => k.prj === HF.pid).map(k => k.kind + ':' + k.id)); }
+function tautHtml() {
+  const H = M.cfg.hpp, q = ($('#tt-q') || {}).value || '';
+  const daftar = HF.kand.filter(k => !q || (k.ket + ' ' + k.tgl).toLowerCase().indexOf(q.toLowerCase()) >= 0).slice(0, HF.lim);
+  return '<div class="fld"><label class="lbl" for="tt-p">Proyek</label><select class="in" id="tt-p" data-act-change="hppTautGanti">' + Object.keys(H.proyek).map(k => opt(k, H.proyek[k].nama, HF.pid)).join('') + '</select></div>' +
+    '<input class="in" id="tt-q" type="search" placeholder="Cari keterangan" value="' + esc(q) + '" style="margin:10px 0">' +
+    '<div class="tw" style="max-height:46vh;overflow:auto"><table class="t"><tbody>' + (daftar.length ? daftar.map(k => '<tr><td style="width:34px"><input type="checkbox" data-tk="' + esc(k.kind + ':' + k.id) + '" data-act-change="hppTautPilih"' + (HF.pilih.has(k.kind + ':' + k.id) ? ' checked' : '') + ' aria-label="Tautkan ' + esc(k.ket) + '"></td><td><div class="k1">' + esc(k.ket || '(tanpa keterangan)') + '</div><div class="k2">' + tglFmt(k.tgl) + ' · ' + (k.arah === 'masuk' || k.arah === 'jual' ? 'pendapatan' : 'biaya') + '</div></td><td class="n">' + angka(k.jml) + '</td></tr>').join('') : '<tr><td class="muted">Tidak ada transaksi yang cocok.</td></tr>') + '</tbody></table></div>' +
+    (HF.kand.length > daftar.length ? '<p class="note" style="margin-top:6px">Menampilkan ' + daftar.length + ' dari ' + HF.kand.length + '. Gunakan pencarian untuk mempersempit.</p>' : '') + '<p class="note" style="margin-top:6px">Centang yang termasuk proyek ini; hilangkan centang untuk melepas tautan. Pendapatan dan biaya langsung proyek muncul di laporan proyek.</p>';
+}
+function hppTautSimpan() {
+  const pid = HF.pid; let n = 0;
+  HF.kand.forEach(k => {
+    const mau = HF.pilih.has(k.kind + ':' + k.id), kini = k.prj === pid; if (mau === kini) return;
+    const rec = Object.assign({}, k.kind === 'tx' ? M.txById[k.id] : M.jrById[k.id]);
+    if (mau) rec.prj = pid; else delete rec.prj;
+    if (k.kind === 'tx' ? Store.simpanTx(rec) : Store.simpanJr(rec)) n++;
+  });
+  toast(n ? n + ' transaksi diperbarui.' : 'Tidak ada perubahan.'); tutupModal();
+}
+
+/* ----- kartu stok ----- */
+function bukaKartu(b) {
+  const H = hppH(), br = H && H.barang[b]; if (!br) return;
+  const rows = (M.hpp.kartu[b] || []).slice(), s = M.hpp.st[b] || { q: 0, n: 0, avg: 0 };
+  const tp = { beli: 'Pembelian', jual: 'Penjualan', awal: 'Stok awal', opname: 'Opname', 'prod-masuk': 'Hasil produksi', 'prod-keluar': 'Bahan produksi' };
+  bukaModal({
+    judul: 'Kartu stok · ' + br.nama, lebar: true, tanpaFokus: true,
+    isi: '<div class="sum"><span>Stok <b>' + hppJml(s.q) + ' ' + esc(br.satuan || '') + '</b></span><span>Nilai <b>' + rp(s.n) + '</b></span><span>HPP rata-rata <b>' + rp(s.q > 1e-9 ? s.n / s.q : s.avg) + '</b></span></div>' +
+      (rows.length ? '<div class="tw" style="max-height:52vh;overflow:auto"><table class="t rapat"><thead><tr><th>Tanggal</th><th>Keterangan</th><th class="r">Masuk</th><th class="r">Keluar</th><th class="r">Stok</th><th class="r">Nilai</th></tr></thead><tbody>' + rows.map(r => '<tr><td style="white-space:nowrap">' + tglFmt(r.tgl) + '</td><td><div class="k1">' + esc(r.ket || tp[r.tipe]) + '</div><div class="k2">' + tp[r.tipe] + (r.dn ? ' · ' + (r.dn > 0 ? '+' : '') + angka(r.dn) : '') + '</div></td><td class="n">' + (r.dq > 0 ? hppJml(r.dq) : '') + '</td><td class="n">' + (r.dq < 0 ? hppJml(-r.dq) : '') + '</td><td class="n">' + hppJml(r.q) + '</td><td class="n">' + angka(r.n) + '</td></tr>').join('') + '</tbody></table></div>' : '<p class="note">Belum ada pergerakan stok untuk barang ini.</p>'),
+    tombol: (Store.canWrite ? '<button class="btn" data-act="hppBarangUbah" data-id="' + esc(b) + '">Ubah barang</button><span class="sp"></span>' : '') + '<button class="btn pri" data-act="tutupModal">Tutup</button>',
+  });
+}
+
+const ACT_HPP = {
+  hppAktif() { bukaAktif(); }, hppAktifSimpan() { hppAktifSimpan(); },
+  hppBarangBaru() { bukaBarang(null); }, hppBarangUbah(el) { bukaBarang(el.dataset.id); }, hppBarangSimpan() { hppBarangSimpan(); }, hppBarangHapus(el) { hppBarangHapus(el); },
+  hppKartu(el) { bukaKartu(el.dataset.id); },
+  hppBeli() { bukaBJ('beli'); }, hppJual() { bukaBJ('jual'); }, hppBJJenis(el) { bukaBJ(el.dataset.j); }, hppBJSimpan() { hppBJSimpan(); },
+  hppRinci(el) { bukaRincian(el.dataset.k, el.dataset.id); }, hppRinciSimpan() { hppRinciSimpan(); }, hppRinciHapus(el) { hppRinciHapus(el); }, hppRinciSesuai() { hppRinciSesuai(); },
+  hppAwal() { bukaAwal(null); }, hppAwalSimpan() { hppAwalSimpan(); },
+  hppOpname() { bukaOpname(null); }, hppOpnameSimpan() { hppOpnameSimpan(); },
+  hppProduksi() { bukaProduksi(null); }, hppProdResepBuka(el) { bukaProduksi(null, el.dataset.id); }, hppProdSimpan() { hppProdSimpan(); },
+  hppCatatanHapus(el) { hppCatatanHapus(el); },
+  hppCatatanUbah(el) {
+    const k = el.dataset.k, id = el.dataset.id, e = hppKumpul(Store.S).find(x => x.id === id);
+    if (!e) return;
+    if (e.k === 'awal') bukaAwal(id); else if (e.k === 'opname') bukaOpname(id); else if (e.k === 'prod') bukaProduksi(id); else bukaRincian(k, id);
+  },
+  hppResepBaru() { bukaResep(null); }, hppResepUbah(el) { bukaResep(el.dataset.id); }, hppResepSimpan() { hppResepSimpan(); }, hppResepHapus(el) { hppResepHapus(el); },
+  hppProyekBaru() { bukaProyek(null); }, hppProyekUbah(el) { bukaProyek(el.dataset.id); }, hppProyekSimpan() { hppProyekSimpan(); }, hppProyekHapus(el) { hppProyekHapus(el); },
+  hppTaut(el) { bukaTaut(el.dataset.id); }, hppTautSimpan() { hppTautSimpan(); },
+  hlTambah() { hlBaca(); HF.lines.push({ b: '', q: '', h: '' }); hlGambar(); },
+  hlHapus(el) { hlBaca(); HF.lines.splice(+el.dataset.i, 1); if (!HF.lines.length) HF.lines.push({ b: '', q: '', h: '' }); hlGambar(); },
+  tabHpp(el) { UI.hpp.tab = el.dataset.t; render(); },
+  hppLapTampil(el) { UI.hpp.lap = el.dataset.v; render(); },
+  hppUnduh() { unduhHpp(); },
+  hppMulai() {
+    const H = M.cfg.hpp; if (!H) return;
+    bukaModal({ judul: 'Tanggal mulai pelacakan stok', tanpaFokus: true, isi: '<div class="fld"><label class="lbl" for="ha-mulai">Mulai dari tanggal</label><input class="in" id="ha-mulai" type="date" value="' + esc(H.mulai || '') + '"></div><p class="note" style="margin-top:8px">Hanya mempengaruhi daftar "Perlu dilengkapi": transaksi sebelum tanggal ini tidak diminta rincian barang.</p><div class="hint neg" id="ha-err" role="alert"></div>', tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppAktifSimpan">Simpan</button>' });
+  },
+};
+const ACTC_HPP = {
+  hlGanti(el) {
+    hlBaca(); const i = +el.dataset.i, l = HF.lines[i];
+    if (l && l.b && !(l.h > 0)) {
+      const br = M.cfg.hpp.barang[l.b] || {};
+      if (HF.mode === 'jual' && br.jual) l.h = br.jual;
+      else if ((HF.mode === 'beli') && hppRata(l.b) > 0) l.h = Math.round(hppRata(l.b));
+    }
+    hlGambar();
+  },
+  hlLive() { hlLive(); },
+  hppOpTgl() { hppOpTgl(); },
+  hppProdResep() { hppProdResep(); },
+  hppTautGanti(el) { HF.pid = el.value; tautMuat(); const b = $('.md-b'); if (b) b.innerHTML = tautHtml(); },
+  hppTautPilih(el) { if (el.checked) HF.pilih.add(el.dataset.tk); else HF.pilih.delete(el.dataset.tk); },
+  hppTautCari() { const b = $('.md-b'); if (!b) return; const q = $('#tt-q').value; b.innerHTML = tautHtml(); const e = $('#tt-q'); e.value = q; e.focus(); e.setSelectionRange(q.length, q.length); },
+};
+
+/* ===== hpp_ui.js ===== */
+/* ================= HPP: halaman (Stok, Catatan stok, Laporan HPP, Resep, Proyek) ================= */
+function hppIntro() {
+  const tulis = Store.canWrite;
+  return '<div class="panel" style="max-width:760px"><div class="panel-h"><h2>Belum diaktifkan</h2></div>' +
+    '<p>Fitur ini melacak stok barang, menghitung HPP otomatis dengan <b>rata-rata bergerak</b>, mencatat produksi, dan menyusun laporan harga pokok. Aktifkan bila usahamu menjual barang, memproduksi, atau mengerjakan proyek.</p>' +
+    '<ul class="note" style="margin:10px 0 12px 18px;line-height:1.7"><li><b>Dagang</b>: catat pembelian dan penjualan barang, HPP dan stok terhitung sendiri.</li><li><b>Produksi</b>: bahan baku, tenaga kerja, dan overhead menjadi harga pokok barang jadi.</li><li><b>Jasa atau proyek</b>: pendapatan dan biaya langsung per proyek, dengan laba kotornya.</li><li><b>Resep</b>: kalkulator HPP per produk dan harga jual saran.</li></ul>' +
+    '<p class="note">Aman untuk data yang sudah ada: transaksi lama tidak berubah. Fitur ini opsional dan hanya berlaku mulai tanggal yang kamu pilih.</p>' +
+    (tulis ? '<div style="margin-top:14px"><button class="btn pri" data-act="hppAktif">Aktifkan HPP &amp; Persediaan</button></div>' : '<p class="note" style="margin-top:10px">Akses Anda hanya untuk melihat.</p>') + '</div>';
+}
+const hppSatuanTeks = (b, q) => hppJml(q) + ' ' + esc((b && b.satuan) || '');
+
+function vHpp() {
+  const H = M.cfg.hpp, f = UI.hpp, th = UI.tahun;
+  if (!H || !H.aktif) return kepala('HPP & Persediaan', 'Stok barang, harga pokok penjualan, produksi, resep, dan laba per proyek.', '', true) + hppIntro();
+  const R = M.hpp, ada = Object.keys(H.barang).length > 0;
+  let h = kepala('HPP & Persediaan', 'Stok barang, HPP otomatis, produksi, resep, dan laba per proyek.', ada ? '<button class="btn" data-act="hppUnduh">' + IC.unduh + ' Excel</button>' : '');
+  const gl = M.saldoSd(R.akunPers, '9999-12'), selisih = gl - R.nilai;
+  const hppTh = ['akunHpp', 'akunSel'].reduce((s, k) => s + (M.am[R[k]] ? M.mutT(R[k], th + '-01', th + '-12') : 0), 0);
+  const br = hppBelumRinci(M, M.cfg), nBr = br.beli.length + br.jual.length + br.selisih.length;
+  const menipis = Object.keys(H.barang).filter(id => H.barang[id].min > 0 && (R.st[id] ? R.st[id].q : 0) <= H.barang[id].min).length;
+  h += '<section class="hero inv-hero" aria-label="Ringkasan persediaan">' +
+    '<div class="tile"><div class="k">Nilai persediaan (stok)</div><div class="v">' + rpV(R.nilai) + '</div><div class="d"><span>' + Object.keys(H.barang).length + ' barang' + (menipis ? ' · ' + menipis + ' menipis' : '') + '</span></div></div>' +
+    '<div class="tile"><div class="k">Saldo akun Persediaan</div><div class="v">' + rpV(gl) + '</div><div class="d">' + (Math.abs(selisih) < 1 ? '<span class="chip ok">Sama dengan stok</span>' : '<span class="chip warn">Selisih ' + rp(selisih) + '</span>') + '</div></div>' +
+    '<div class="tile"><div class="k">HPP tahun ' + th + '</div><div class="v">' + rpV(hppTh) + '</div><div class="d"><span>Otomatis dari penjualan barang</span></div></div>' +
+    '<div class="tile"><div class="k">Perlu diperhatikan</div><div class="v">' + (nBr + R.peringatan.length) + '</div><div class="d"><span>' + nBr + ' perlu rincian · ' + R.peringatan.length + ' peringatan</span></div></div></section>';
+  h += tabsHtml([['stok', 'Stok'], ['catatan', 'Catatan stok'], ['laporan', 'Laporan HPP'], ['resep', 'Resep'], ['proyek', 'Proyek']], f.tab, 'tabHpp');
+  if (f.tab === 'catatan') return h + hppTabCatatan(H, R);
+  if (f.tab === 'laporan') return h + hppTabLaporan(H, R);
+  if (f.tab === 'resep') return h + hppTabResep(H, R);
+  if (f.tab === 'proyek') return h + hppTabProyek(H, R);
+  return h + hppTabStok(H, R, br, selisih);
+}
+
+function hppTabStok(H, R, br, selisih) {
+  const f = UI.hpp, tulis = Store.canWrite, ids = Object.keys(H.barang);
+  let h = '';
+  if (ids.length && Math.abs(selisih) >= 1) h += '<div class="banner info"><div><b>Stok dan buku besar belum sama (selisih ' + rp(selisih) + ').</b> Biasanya karena stok awal belum dicatat, pembelian ke Persediaan belum dirinci per barang, atau ada saldo awal Persediaan yang belum dipecah ke barang.</div>' + (tulis ? '<div><button class="btn sm" data-act="hppAwal">Catat stok awal</button></div>' : '') + '</div>';
+  R.peringatan.slice(0, 5).forEach(p => { h += '<div class="banner"><div>' + esc(p.teks) + '</div></div>'; });
+  const nBr = br.beli.length + br.jual.length + br.selisih.length;
+  if (nBr) {
+    const baris = (arr, lb, kls) => arr.slice(0, 6).map(x => '<tr><td><div class="k1">' + esc(x.ket || x.pihak || '(tanpa keterangan)') + '</div><div class="k2">' + tglFmt(x.tgl) + ' · ' + lb + '</div></td><td class="n">' + angka(x.jml) + (x.nilaiStok != null ? '<div class="k2 neg">rincian ' + angka(x.nilaiStok) + '</div>' : '') + '</td><td class="r">' + (tulis ? '<button class="btn sm" data-act="hppRinci" data-k="' + x.kind + '" data-id="' + esc(x.id) + '">' + kls + '</button>' : '') + '</td></tr>').join('');
+    h += '<details class="panel" style="margin-bottom:14px"' + (nBr <= 3 ? ' open' : '') + '><summary style="cursor:pointer;font-weight:600">Perlu dirinci per barang (' + nBr + ')</summary><p class="note" style="margin:8px 0">Transaksi sejak ' + tglFmt(H.mulai || '') + ' ke akun Persediaan atau Penjualan yang belum punya rincian barang. Rinci supaya stok dan HPP-nya ikut terhitung. <button class="btn sm ghost" data-act="hppMulai">Ubah tanggal mulai</button></p><div class="tw"><table class="t rapat"><tbody>' +
+      baris(br.beli, 'pembelian', 'Rinci') + baris(br.jual, 'penjualan', 'Rinci') + baris(br.selisih, 'nilai tidak sama', 'Perbaiki') + '</tbody></table></div>' +
+      (nBr > 18 ? '<p class="note" style="margin-top:6px">Menampilkan sebagian. Selesaikan dulu yang di atas.</p>' : '') + '</details>';
+  }
+  h += '<div class="bar">' + (tulis ? '<button class="btn pri" data-act="hppBarangBaru">' + IC.plus + ' Barang</button><button class="btn" data-act="hppBeli">Pembelian</button><button class="btn" data-act="hppJual">Penjualan</button>' : '') +
+    '<select class="in" data-ui="hpp.jenis" aria-label="Jenis barang" style="width:auto">' + opt('', 'Semua jenis', f.jenis) + Object.keys(HPP_JENIS).map(k => opt(k, HPP_JENIS[k], f.jenis)).join('') + '</select>' +
+    '<input class="in" type="search" id="hpp-q" data-uiq="hpp.q" value="' + esc(f.q) + '" placeholder="Cari barang" aria-label="Cari barang" style="flex:1 1 160px;min-width:0"></div>';
+  if (!ids.length) return h + '<div class="panel"><div class="empty"><b>Belum ada barang.</b>Tambahkan barang, lalu catat stok awal atau pembelian pertama. HPP dihitung otomatis setiap kali barang terjual.' + (tulis ? '<div style="margin-top:12px"><button class="btn pri" data-act="hppBarangBaru">Tambah barang</button></div>' : '') + '</div></div>';
+  const q = (f.q || '').toLowerCase();
+  const daftar = ids.map(id => Object.assign({ id }, H.barang[id])).filter(b => (!f.jenis || b.jenis === f.jenis) && (!q || (b.nama + ' ' + (b.kode || '')).toLowerCase().indexOf(q) >= 0)).sort((a, b) => a.nama.localeCompare(b.nama, 'id'));
+  if (!daftar.length) return h + '<div class="panel"><div class="empty">Tidak ada barang yang cocok.</div></div>';
+  let tot = 0;
+  const rows = daftar.map(b => {
+    const s = R.st[b.id] || { q: 0, n: 0, avg: 0 }; tot += s.n;
+    const rata = s.q > 1e-9 ? s.n / s.q : s.avg, kurang = b.min > 0 && s.q <= b.min, minus = s.q < -1e-9;
+    return '<tr class="klik" data-act="hppKartu" data-id="' + esc(b.id) + '" tabindex="0" role="button" aria-label="Kartu stok ' + esc(b.nama) + '"><td><div class="k1">' + esc(b.nama) + '</div><div class="k2">' + (b.kode ? esc(b.kode) + ' · ' : '') + esc(HPP_JENIS[b.jenis] || '') + (minus ? ' · <span class="neg">stok minus</span>' : kurang ? ' · <span class="neg">menipis</span>' : '') + '</div></td><td class="n' + (minus ? ' neg' : '') + '">' + hppSatuanTeks(b, s.q) + '</td><td class="n">' + angka(rata) + '</td><td class="n">' + angka(s.n) + '</td></tr>';
+  }).join('');
+  return h + '<div class="tw"><table class="t"><thead><tr><th>Barang</th><th class="r">Stok</th><th class="r">HPP rata-rata</th><th class="r">Nilai</th></tr></thead><tbody>' + rows + '</tbody><tfoot><tr><th>Total</th><th></th><th></th><th class="r n">' + angka(tot) + '</th></tr></tfoot></table></div><p class="note" style="margin-top:8px">Ketuk barang untuk melihat kartu stok. HPP dihitung dengan rata-rata bergerak.</p>';
+}
+
+function hppCatatanDaftar(H, R) {
+  const idx = {}; R.rows.forEach(r => { (idx[r.id] = idx[r.id] || []).push(r); });
+  const nm = b => (H.barang[b] || {}).nama || '(dihapus)';
+  return hppKumpul(Store.S).map(e => {
+    const rs = idx[e.id] || [], masuk = rs.filter(r => r.dn > 0 || (r.dn === 0 && r.dq > 0)), keluar = rs.filter(r => r.dq < 0);
+    let jenis, nilai;
+    if (e.k === 'awal') { jenis = 'Stok awal'; nilai = masuk.reduce((s, r) => s + r.dn, 0); }
+    else if (e.k === 'opname') { jenis = 'Opname'; nilai = rs.reduce((s, r) => s + r.dn, 0); }
+    else if (e.k === 'prod') { jenis = 'Produksi'; const p = R.produksi.find(x => x.id === e.id); nilai = p ? p.total : 0; }
+    else if (e.lines.some(l => l.q > 0) && e.lines.some(l => l.q < 0)) { jenis = 'Beli & jual'; nilai = keluar.reduce((s, r) => s - r.dn, 0); }
+    else if (e.lines.some(l => l.q > 0)) { jenis = 'Pembelian'; nilai = masuk.reduce((s, r) => s + r.dn, 0); }
+    else { jenis = 'Penjualan'; nilai = keluar.reduce((s, r) => s - r.dn, 0); }
+    const nama = Array.from(new Set(e.lines.map(l => nm(l.b || (e.hs && e.hs.jadi)))));
+    if (e.k === 'prod' && e.hs.jadi) nama.unshift(nm(e.hs.jadi));
+    return { e, jenis, nilai, ringkas: nama.slice(0, 2).join(', ') + (nama.length > 2 ? ' +' + (nama.length - 2) : '') };
+  }).reverse();
+}
+function hppTabCatatan(H, R) {
+  const tulis = Store.canWrite, th = String(UI.tahun);
+  const semua = hppCatatanDaftar(H, R), daftar = semua.filter(c => c.e.tgl.slice(0, 4) === th);
+  let h = '<div class="bar">' + (tulis ? '<button class="btn pri" data-act="hppProduksi">' + IC.plus + ' Produksi</button><button class="btn" data-act="hppOpname">Stok opname</button><button class="btn" data-act="hppAwal">Stok awal</button><button class="btn" data-act="hppBeli">Pembelian</button><button class="btn" data-act="hppJual">Penjualan</button>' : '') + '</div>';
+  if (!daftar.length) return h + '<div class="panel"><div class="empty"><b>Belum ada catatan stok tahun ' + th + '.</b>Pembelian, penjualan, produksi, opname, dan stok awal yang kamu catat muncul di sini.' + (semua.length ? ' Ada ' + semua.length + ' catatan di tahun lain; ganti tahun buku di kanan atas.' : '') + '</div></div>';
+  const kls = { 'Pembelian': 'acc', 'Penjualan': 'ok', 'Produksi': 'warn', 'Opname': '', 'Stok awal': '' };
+  return h + '<div class="tw"><table class="t"><thead><tr><th>Catatan</th><th class="r">Nilai</th><th></th></tr></thead><tbody>' + daftar.map(c => '<tr><td><div class="k1">' + esc(c.e.ket || c.ringkas) + '</div><div class="k2">' + tglFmt(c.e.tgl) + ' · <span class="chip ' + (kls[c.jenis] || '') + '">' + c.jenis + '</span> ' + esc(c.ringkas) + '</div></td><td class="n">' + angka(c.nilai) + '</td><td class="r">' + (tulis ? '<button class="btn sm" data-act="hppCatatanUbah" data-k="' + c.e.sumber + '" data-id="' + esc(c.e.id) + '">' + (c.e.k === 'tx' || c.e.k === 'jr' ? 'Rincian' : 'Ubah') + '</button>' : '') + '</td></tr>').join('') + '</tbody></table></div><p class="note" style="margin-top:8px">Pembelian dan penjualan mengubah tanggal, nilai, atau pihaknya lewat menu Kas &amp; Bank atau Invoice. Rincian barangnya diubah di sini.</p>';
+}
+
+function hppTabLaporan(H, R) {
+  const f = UI.hpp, th = UI.tahun, K = kolomLaporan(th, 'tahun', f.lap === 'bulanan' ? 'bulanan' : 'banding'), L = hppLines(R, K.cols, M);
+  let h = '<div class="bar"><div class="seg" role="group" aria-label="Tampilan laporan"><button type="button" data-act="hppLapTampil" data-v="banding" aria-pressed="' + (f.lap !== 'bulanan') + '">Banding tahun lalu</button><button type="button" data-act="hppLapTampil" data-v="bulanan" aria-pressed="' + (f.lap === 'bulanan') + '">Per bulan</button></div></div>';
+  h += '<div class="panel-h"><h2>Laporan Harga Pokok Penjualan</h2><span class="sub">Untuk periode ' + esc(K.e.label) + '</span></div>' + renderStatement(L.lines, K.cols, { delta: K.delta });
+  h += '<p class="note" style="margin:8px 0 18px">Persediaan awal + pembelian − persediaan akhir = HPP, sudah termasuk selisih stok opname. Barisnya memakai catatan stok sejak fitur ini diaktifkan.</p>';
+  const rek = hppRekapBarang(R, K.e.a, K.e.b).filter(x => Math.abs(x.awalQ) + Math.abs(x.masukQ) + Math.abs(x.keluarQ) + Math.abs(x.akhirQ) > 1e-9).sort((a, b) => ((H.barang[a.b] || {}).nama || '').localeCompare((H.barang[b.b] || {}).nama || '', 'id'));
+  if (rek.length) h += '<div class="panel-h"><h2>Pergerakan per barang</h2><span class="sub">' + esc(K.e.label) + '</span></div><div class="tw"><table class="t rapat"><thead><tr><th>Barang</th><th class="r">Awal</th><th class="r">Masuk</th><th class="r">Keluar</th><th class="r">Akhir</th><th class="r">Nilai akhir</th></tr></thead><tbody>' + rek.map(x => { const b = H.barang[x.b] || { nama: '(dihapus)', satuan: '' }; return '<tr><td>' + esc(b.nama) + '</td><td class="n">' + hppJml(x.awalQ) + '</td><td class="n">' + hppJml(x.masukQ) + '</td><td class="n">' + hppJml(x.keluarQ) + '</td><td class="n">' + hppJml(x.akhirQ) + '</td><td class="n">' + angka(x.akhirN) + '</td></tr>'; }).join('') + '</tbody></table></div>';
+  const prod = R.produksi.filter(p => p.tgl.slice(0, 7) >= K.e.a && p.tgl.slice(0, 7) <= K.e.b);
+  if (prod.length) h += '<div class="panel-h" style="margin-top:18px"><h2>Produksi</h2><span class="sub">' + prod.length + ' kali</span></div><div class="tw"><table class="t rapat"><thead><tr><th>Tanggal</th><th>Barang jadi</th><th class="r">Hasil</th><th class="r">Bahan</th><th class="r">Tenaga kerja</th><th class="r">Overhead</th><th class="r">Per unit</th></tr></thead><tbody>' + prod.map(p => '<tr><td>' + tglFmt(p.tgl) + '</td><td>' + esc((H.barang[p.jadi] || {}).nama || '') + '</td><td class="n">' + hppJml(p.qty) + '</td><td class="n">' + angka(p.bahan) + '</td><td class="n">' + angka(p.tkl) + '</td><td class="n">' + angka(p.bop) + '</td><td class="n">' + angka(p.perUnit) + '</td></tr>').join('') + '</tbody></table></div>';
+  return h;
+}
+
+function hppTabResep(H, R) {
+  const tulis = Store.canWrite, ids = Object.keys(H.resep || {});
+  let h = '<div class="bar">' + (tulis ? '<button class="btn pri" data-act="hppResepBaru">' + IC.plus + ' Resep</button>' : '') + '</div>';
+  if (!ids.length) return h + '<div class="panel"><div class="empty"><b>Belum ada resep.</b>Susun bahan, tenaga kerja, dan overhead sebuah produk untuk mengetahui HPP per unit dan harga jual yang masuk akal. Resep juga mempercepat pencatatan produksi.' + (tulis ? '<div style="margin-top:12px"><button class="btn pri" data-act="hppResepBaru">Buat resep pertama</button></div>' : '') + '</div></div>';
+  return h + '<div class="tw"><table class="t"><thead><tr><th>Produk</th><th class="r">HPP per unit</th><th class="r">Harga jual saran</th><th></th></tr></thead><tbody>' + ids.map(id => { const r = H.resep[id], c = hppResep(r, hppRata); return '<tr><td><div class="k1">' + esc(r.nama) + '</div><div class="k2">Hasil ' + hppJml(r.hasil) + ' ' + esc(r.satuan || '') + ' · margin ' + hppJml(r.margin || 0) + '%' + (c.tanpaHarga ? ' · <span class="neg">' + c.tanpaHarga + ' bahan tanpa harga</span>' : '') + '</div></td><td class="n">' + angka(c.perUnit) + '</td><td class="n">' + angka(c.jual) + '</td><td class="r" style="white-space:nowrap">' + (tulis ? (r.barang ? '<button class="btn sm" data-act="hppProdResepBuka" data-id="' + esc(id) + '">Produksi</button> ' : '') + '<button class="btn sm" data-act="hppResepUbah" data-id="' + esc(id) + '">Ubah</button>' : '') + '</td></tr>'; }).join('') + '</tbody></table></div><p class="note" style="margin-top:8px">Harga bahan yang dipilih dari stok mengikuti HPP rata-rata stok saat ini, jadi angkanya ikut berubah bila harga beli berubah. Tombol Produksi muncul untuk resep yang dihubungkan ke barang jadi.</p>';
+}
+
+function hppTabProyek(H, R) {
+  const tulis = Store.canWrite, ids = Object.keys(H.proyek || {}), P = hppProyek(M.J, M.am, H);
+  let h = '<div class="bar">' + (tulis ? '<button class="btn pri" data-act="hppProyekBaru">' + IC.plus + ' Proyek</button>' + (ids.length ? '<button class="btn" data-act="hppTaut">Tautkan transaksi</button>' : '') : '') + '</div>';
+  if (!ids.length) return h + '<div class="panel"><div class="empty"><b>Belum ada proyek.</b>Untuk usaha jasa atau kontraktor: buat proyek, tautkan pendapatan dan biaya langsungnya, lalu lihat laba kotor tiap proyek.' + (tulis ? '<div style="margin-top:12px"><button class="btn pri" data-act="hppProyekBaru">Buat proyek pertama</button></div>' : '') + '</div></div>';
+  let tp = 0, tb = 0;
+  const rows = ids.map(id => {
+    const p = P[id], pr = H.proyek[id]; tp += p.pendapatan; tb += p.biaya;
+    return '<tr><td><div class="k1">' + esc(pr.nama) + '</div><div class="k2">' + (pr.pihak ? esc(pr.pihak) + ' · ' : '') + (pr.status === 'selesai' ? 'Selesai' : 'Berjalan') + (p.kontrak ? ' · kontrak ' + angka(p.kontrak) + (isFinite(p.tertagih) ? ' (' + pct(p.tertagih) + ' ditagih)' : '') : '') + ' · ' + p.n + ' transaksi</div></td><td class="n">' + angka(p.pendapatan) + '</td><td class="n">' + angka(p.biaya) + '</td><td class="n' + angkaCls(p.laba) + '">' + angka(p.laba) + (isFinite(p.margin) ? '<div class="k2">' + pct(p.margin) + '</div>' : '') + '</td><td class="r">' + (tulis ? '<button class="btn sm" data-act="hppTaut" data-id="' + esc(id) + '">Tautkan</button> <button class="btn sm" data-act="hppProyekUbah" data-id="' + esc(id) + '">Ubah</button>' : '') + '</td></tr>';
+  }).join('');
+  return h + '<div class="tw"><table class="t"><thead><tr><th>Proyek</th><th class="r">Pendapatan</th><th class="r">Biaya langsung</th><th class="r">Laba kotor</th><th></th></tr></thead><tbody>' + rows + '</tbody><tfoot><tr><th>Total</th><th class="r n">' + angka(tp) + '</th><th class="r n">' + angka(tb) + '</th><th class="r n">' + angka(tp - tb) + '</th><th></th></tr></tfoot></table></div><p class="note" style="margin-top:8px">Dihitung dari transaksi dan invoice yang ditautkan ke proyek (semua tahun). Biaya langsung mencakup akun HPP dan beban yang ditautkan.</p>';
+}
+
+/* ----- Excel ----- */
+function unduhHpp() {
+  if (!pastikanXlsx()) return;
+  const H = M.cfg.hpp, R = M.hpp, th = UI.tahun, wb = XLSX.utils.book_new(), add = (ws, n) => XLSX.utils.book_append_sheet(wb, ws, n);
+  const K = kolomLaporan(th, 'tahun', 'banding'), L = hppLines(R, K.cols, M), nm = b => (H.barang[b] || {}).nama || '(dihapus)';
+  add(buatSheet(statementAoa('Laporan Harga Pokok Penjualan', 'Untuk periode ' + K.e.label, L.lines, K.cols, K.delta)), 'Laporan HPP');
+  const ids = Object.keys(H.barang).sort((a, b) => H.barang[a].nama.localeCompare(H.barang[b].nama, 'id'));
+  add(sheetTabel('Stok barang', 'Per ' + tglPanjang(hariIni()), ['Barang', 'Kode', 'Jenis', 'Satuan', 'Stok', 'HPP rata-rata', 'Nilai'], ids.map(id => { const b = H.barang[id], s = R.st[id] || { q: 0, n: 0, avg: 0 }; return [b.nama, b.kode || '', HPP_JENIS[b.jenis] || '', b.satuan || '', s.q, Math.round(s.q > 1e-9 ? s.n / s.q : s.avg), s.n]; }), [null, null, null, null, '#,##0.######', FMT_ANGKA, FMT_ANGKA], [34, 14, 22, 10, 12, 16, 18]), 'Stok');
+  const tp = { beli: 'Pembelian', jual: 'Penjualan', awal: 'Stok awal', opname: 'Opname', 'prod-masuk': 'Hasil produksi', 'prod-keluar': 'Bahan produksi' };
+  add(sheetTabel('Kartu stok', 'Semua pergerakan', ['Tanggal', 'Barang', 'Jenis', 'Keterangan', 'Jumlah', 'Nilai', 'Stok', 'Nilai stok'], R.rows.map(r => [serialExcel(r.tgl), nm(r.b), tp[r.tipe], r.ket || '', r.dq, r.dn, r.q, r.n]), [FMT_TGL, null, null, null, '#,##0.######;-#,##0.######', FMT_ANGKA, '#,##0.######;-#,##0.######', FMT_ANGKA], [12, 30, 16, 36, 12, 16, 12, 16]), 'Kartu Stok');
+  if (R.produksi.length) add(sheetTabel('Produksi', 'Semua catatan', ['Tanggal', 'Barang jadi', 'Hasil', 'Bahan', 'Tenaga kerja', 'Overhead', 'Total', 'Per unit'], R.produksi.map(p => [serialExcel(p.tgl), nm(p.jadi), p.qty, p.bahan, p.tkl, p.bop, p.total, Math.round(p.perUnit)]), [FMT_TGL, null, '#,##0.######', FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA], [12, 30, 12, 16, 16, 16, 16, 16]), 'Produksi');
+  const rs = Object.keys(H.resep || {});
+  if (rs.length) add(sheetTabel('Resep dan HPP produk', 'Per ' + tglPanjang(hariIni()), ['Produk', 'Hasil', 'Satuan', 'Bahan', 'Tenaga kerja', 'Overhead', 'Total per resep', 'HPP per unit', 'Margin', 'Harga jual saran'], rs.map(id => { const r = H.resep[id], c = hppResep(r, hppRata); return [r.nama, r.hasil, r.satuan || '', c.bahan, c.tkl, c.bop, c.total, Math.round(c.perUnit), c.margin, Math.round(c.jual)]; }), [null, '#,##0.######', null, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_PCT, FMT_ANGKA], [30, 10, 10, 16, 16, 16, 18, 16, 10, 18]), 'Resep');
+  const pj = Object.keys(H.proyek || {});
+  if (pj.length) { const P = hppProyek(M.J, M.am, H); add(sheetTabel('Laba kotor per proyek', 'Semua tahun', ['Proyek', 'Pelanggan', 'Status', 'Nilai kontrak', 'Pendapatan', 'Biaya langsung', 'Laba kotor', 'Margin'], pj.map(id => { const p = P[id], pr = H.proyek[id]; return [pr.nama, pr.pihak || '', pr.status === 'selesai' ? 'Selesai' : 'Berjalan', p.kontrak, p.pendapatan, p.biaya, p.laba, isFinite(p.margin) ? p.margin : '']; }), [null, null, null, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_PCT], [30, 24, 12, 16, 16, 16, 16, 10]), 'Proyek'); }
+  simpanBerkas('hpp-' + th + '-' + slug(M.cfg.perusahaan.nama) + '.xlsx', XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
+}
 
 /* ===== export.js ===== */
 /* ================= Ekspor: Excel (SheetJS) & PDF (jsPDF) ================= */
@@ -4193,7 +5126,7 @@ function unduhExcel() {
     kas.map(r => [serialExcel(r.tgl), r.ref || '', r.jenis === 'masuk' ? 'Masuk' : r.jenis === 'keluar' ? 'Keluar' : 'Transfer', namaAkun(r.akun), namaAkun(r.lawan), r.ket || '', r.masuk || '', r.keluar || '', r.saldo]),
     [FMT_TGL, null, null, null, null, null, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA], [12, 16, 10, 18, 28, 48, 16, 16, 18]);
   add(wk, 'Kas & Bank');
-  const jr = []; M.J.filter(j => j.tgl.slice(0, 4) === String(th)).forEach(j => j.baris.forEach(b => jr.push([serialExcel(j.tgl), j.ref || '', j.ket || '', b.akun, namaAkun(b.akun), b.d || '', b.k || '', j.sumber === 'kas' ? 'Kas & Bank' : j.sumber === 'manual' ? 'Manual' : 'Saldo awal'])));
+  const jr = []; M.J.filter(j => j.tgl.slice(0, 4) === String(th)).forEach(j => j.baris.forEach(b => jr.push([serialExcel(j.tgl), j.ref || '', j.ket || '', b.akun, namaAkun(b.akun), b.d || '', b.k || '', j.sumber === 'kas' ? 'Kas & Bank' : j.sumber === 'manual' ? 'Manual' : j.sumber === 'hpp' ? 'HPP otomatis' : 'Saldo awal'])));
   add(sheetTabel('Jurnal Umum', 'Tahun ' + th, ['Tanggal', 'No. bukti', 'Keterangan', 'Kode akun', 'Nama akun', 'Debit', 'Kredit', 'Sumber'], jr, [FMT_TGL, null, null, null, null, FMT_ANGKA, FMT_ANGKA, null], [12, 16, 48, 12, 30, 16, 16, 12]), 'Jurnal');
   add(sheetTabel('Bagan Akun', namaPT(), ['Kode', 'Nama akun', 'Jenis', 'Kas / bank'], M.akun.slice().sort((a, b) => (a.kode < b.kode ? -1 : 1)).map(a => [a.kode, a.nama, TIPE[a.tipe].label, a.kas ? 'Ya' : '']), [], [12, 40, 28, 12]), 'Bagan Akun');
   simpanBerkas('laporan-keuangan-' + th + '-' + slug(M.cfg.perusahaan.nama) + '.xlsx', XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
@@ -4542,7 +5475,7 @@ const ACT = {
   unduhExcel() { unduhExcel(); },
   unduhPdf() { unduhPdf(); },
 };
-Object.assign(ACT, ACT_SYNC, ACT_SPT, ACT_INV);
+Object.assign(ACT, ACT_SYNC, ACT_SPT, ACT_INV, ACT_HPP);
 const ACTC = {
   txAkun() { if (TX && TX.jenis === 'transfer') isiLawan('transfer', $('#f-lawan').value); },
   simpanTeks(el) {
@@ -4552,7 +5485,7 @@ const ACTC = {
   },
 };
 
-Object.assign(ACTC, ACTC_SYNC, ACTC_SPT, ACTC_INV);
+Object.assign(ACTC, ACTC_SYNC, ACTC_SPT, ACTC_INV, ACTC_HPP);
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
@@ -4595,9 +5528,12 @@ document.addEventListener('input', e => {
     try { t.setSelectionRange(i, i); } catch (er) { /* abaikan */ }
     if (t.dataset.jr) totalJr();
     if (t.dataset.inv) invHitungLive(t.dataset.inv);
+    if (t.dataset.hl && typeof hlLive === 'function' && HF) hlLive();
     if (t.dataset.sa) hitungSaldoAwal();
     return;
   }
+  if (t.dataset && t.dataset.hl && HF) { hlLive(); return; }
+  if (t.id === 'tt-q' && HF && HF.f === 'taut') { ACTC.hppTautCari(); return; }
   if (t.dataset && t.dataset.uiq) { clearTimeout(tunda); tunda = setTimeout(() => { setUiPath(t.dataset.uiq, t.value); render(); }, 140); return; }
   if (t.id === 'f-ket') { saranAkun(); return; }
   if (t.id === 'jr-ket') return;

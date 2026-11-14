@@ -10,8 +10,9 @@ tampilan di dalam Claude, yang sudah punya penyimpanan sendiri).
 A. SIAPKAN SERVER (pemilik, cukup sekali, sekitar 10 menit)
    Lebih nyaman dikerjakan di laptop. Di HP, buka menu Chrome lalu centang "Situs desktop".
 
-   1. Buka supabase.com, daftar gratis, lalu pilih New project. Pilih wilayah Singapore dan
-      simpan kata sandi database yang dibuat.
+   1. Buka supabase.com, daftar gratis, lalu pilih New project. Pilih wilayah terdekat yang
+      tersedia (Singapore; kalau tidak muncul, Korea atau Tokyo tidak masalah) dan simpan
+      kata sandi database yang dibuat.
    2. Tunggu proyek selesai dibuat (sekitar 2 menit). Buka menu SQL Editor, pilih New query.
    3. Di aplikasi pembukuan: Pengaturan > Data & Cadangan > Siapkan sinkronisasi > "Belum ada
       server, siapkan baru". Tekan "Salin kode SQL", kembali ke SQL Editor, tempel, lalu tekan
