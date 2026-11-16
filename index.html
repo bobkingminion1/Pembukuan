@@ -669,12 +669,12 @@ function buatModel(S) {
     const m = S.months[ym];
     (m.tx || []).forEach(t => {
       txAll.push(t); txById[t.id] = t;
-      J.push({ id: t.id, tgl: t.tgl, ket: ketTx(t, am), ref: t.ref, sumber: 'kas', jenis: t.jenis, baris: txBaris(t), prj: t.prj || null, stk: !!(t.stk && t.stk.length) });
+      J.push({ id: t.id, tgl: t.tgl, ket: ketTx(t, am), ref: t.ref, sumber: 'kas', jenis: t.jenis, baris: txBaris(t), prj: t.prj || null, ivk: t.ivk || null, stk: !!(t.stk && t.stk.length) });
     });
     (m.jr || []).forEach(j => {
       jrById[j.id] = j;
       if (j.hs) return;   // catatan stok murni (stok awal, opname, produksi): jurnalnya dibentuk mesin HPP
-      J.push({ id: j.id, tgl: j.tgl, ket: j.ket, ref: j.ref, sumber: 'manual', baris: j.baris, inv: j.inv || null, prj: j.prj || null, stk: !!(j.stk && j.stk.length) });
+      J.push({ id: j.id, tgl: j.tgl, ket: j.ket, ref: j.ref, sumber: 'manual', baris: j.baris, inv: j.inv || null, prj: j.prj || null, ivk: j.ivk || null, stk: !!(j.stk && j.stk.length) });
     });
   });
   // HPP & persediaan (opsional): jurnal HPP, selisih opname, dan biaya produksi dibentuk otomatis dari catatan stok
@@ -1005,6 +1005,17 @@ const hppQ = x => Math.round((+x || 0) * 1e6) / 1e6;
 const hppRp = x => Math.round(+x || 0);
 const hppAktif = cfg => !!(cfg && cfg.hpp && cfg.hpp.aktif);
 const hppNilaiMasuk = l => (l.n != null && l.n !== '' ? hppRp(l.n) : hppRp((+l.q || 0) * (+l.h || 0)));
+// Bagi biaya tambahan pembelian (ongkir + biaya layanan − diskon; boleh negatif) ke tiap baris barang
+// sebanding dengan nilainya. Hasilnya rupiah bulat dan jumlahnya persis sama dengan nilai + tambahan.
+function hppAlokasi(nilai, tambah) {
+  const dasar = nilai.map(hppRp), tot = dasar.reduce((s, v) => s + v, 0);
+  tambah = hppRp(tambah);
+  if (!tambah || !(tot > 0)) return dasar;
+  let besar = 0; dasar.forEach((v, i) => { if (v > dasar[besar]) besar = i; });
+  const out = dasar.map(v => v + Math.round(tambah * v / tot));
+  out[besar] += tambah - (out.reduce((s, v) => s + v, 0) - tot);   // sisa pembulatan masuk ke baris termahal
+  return out;
+}
 function hppCfgBaru(mulai) {
   return { aktif: true, mulai: mulai || '', akunPers: '1-1400', akunHpp: HPP_AKUN.hpp[0], akunSelisih: HPP_AKUN.selisih[0], akunJual: ['4-1000'], akunEkuitas: '3-2000', barang: {}, resep: {}, proyek: {} };
 }
@@ -1078,7 +1089,7 @@ function hppHitung(S, cfg) {
       e.lines.forEach(l => { if (l.q > 0) masuk(e, l.b, l.q, hppNilaiMasuk(l), 'beli'); });
       let C = 0;
       e.lines.forEach(l => { if (l.q < 0) C += keluar(e, l.b, -l.q, 'jual'); });
-      if (C) jurnal.push(buatJr(e, 'HPP · ' + (e.ket || e.ref || 'penjualan'), [{ akun: akunHpp, d: C, k: 0 }, { akun: akunPers, d: 0, k: C }]));
+      if (C) { const jh = buatJr(e, 'HPP · ' + (e.ket || e.ref || 'penjualan'), [{ akun: akunHpp, d: C, k: 0 }, { akun: akunPers, d: 0, k: C }]); jh.ivk = (e.rec && e.rec.ivk) || (e.rec && e.rec.inv && e.rec.inv.jenis === 'jual' ? e.id : null); jurnal.push(jh); }
     } else if (e.k === 'opname') {
       let net = 0;
       e.lines.forEach(l => {
@@ -1189,6 +1200,25 @@ function hppProyek(J, am, H) {
     p.biaya = p.hpp + p.beban; p.laba = p.pendapatan - p.biaya;
     p.margin = p.pendapatan ? p.laba / p.pendapatan : NaN; p.kontrak = kon; p.tertagih = kon ? p.pendapatan / kon : NaN;
   });
+  return out;
+}
+
+/* ----- HPP per nomor invoice penjualan -----
+   HPP barang  = jurnal HPP otomatis dari rincian stok pada invoice itu (atau pemakaian barang yang ditautkan ke invoice);
+   biaya langsung = biaya (akun HPP/beban) pada transaksi atau jurnal yang ditautkan lewat bidang `ivk`.
+   J = jurnal model (termasuk jurnal HPP otomatis), list = hasil invSemua, R = hasil hppHitung.            */
+function hppInvoice(J, am, list, R) {
+  const out = {}, bar = {};
+  ((R && R.rows) || []).forEach(r => { if (r.tipe === 'jual' && r.dq < 0) (bar[r.id] = bar[r.id] || []).push({ b: r.b, q: -r.dq, n: -r.dn }); });
+  (list || []).forEach(i => { if (i.jenis === 'jual') out[i.id] = { id: i.id, no: i.no, tgl: i.tgl, pihak: i.pihak, ket: i.ket, dpp: i.dpp, barang: 0, biaya: 0, nBiaya: 0, brgBaris: [], biayaBaris: [] }; });
+  const beban = a => a && (a.tipe === 'hpp' || a.tipe === 'beban' || a.tipe === 'beban_lain');
+  (J || []).forEach(j => {
+    const o = j.ivk && out[j.ivk]; if (!o) return;
+    let v = 0; (j.baris || []).forEach(b => { if (beban(am[b.akun])) v += (b.d || 0) - (b.k || 0); });
+    if (j.sumber === 'hpp') { o.barang += v; (bar[j.src] || []).forEach(x => o.brgBaris.push(x)); }
+    else if (Math.abs(v) > 0.5) { o.biaya += v; o.nBiaya++; o.biayaBaris.push({ id: j.id, tgl: j.tgl, ket: j.ket || j.ref || '', n: v, kind: j.sumber === 'kas' ? 'tx' : 'jr' }); }
+  });
+  Object.keys(out).forEach(id => { const o = out[id]; o.hpp = o.barang + o.biaya; o.laba = o.dpp - o.hpp; o.margin = o.dpp ? o.laba / o.dpp : NaN; o.ada = o.brgBaris.length > 0 || o.nBiaya > 0 || Math.abs(o.barang) > 0.5; });
   return out;
 }
 
@@ -2058,7 +2088,7 @@ const PAGES = [
   { sep: 1 },
   { id: 'pengaturan', t: 'Pengaturan', ic: 'setelan' },
 ];
-const APP_VERSI = '0a6e5a55f3';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
+const APP_VERSI = 'b4fb1b15de';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
 const versiNyata = () => APP_VERSI.charAt(0) !== '_';
 const sptDilihat = () => { try { return localStorage.getItem('pembukuan.spt.dilihat') === '1'; } catch (e) { return true; } };
 const sptTandaiDilihat = () => { try { localStorage.setItem('pembukuan.spt.dilihat', '1'); } catch (e) { /* abaikan */ } };
@@ -2067,7 +2097,7 @@ const UI = {
   page: 'ringkasan', tahun: new Date().getFullYear(), tahunSet: false,
   kas: { rek: '', bln: '', jenis: '', q: '', lim: 100 },
   invoice: { tab: 'daftar', jenis: '', status: '', q: '' },
-  hpp: { tab: 'stok', q: '', jenis: '', lap: 'banding' },
+  hpp: { tab: 'stok', q: '', jenis: '', lap: 'banding', inv: '', iq: '' },
   jurnal: { tab: 'umum', bln: '', sumber: '', akun: '', q: '', lim: 60 },
   lap: { tab: 'lr', periode: 'tahun', tampil: 'banding' },
   set: { tab: 'profil' },
@@ -2362,6 +2392,7 @@ function bukaTx(id, preset) {
     '<div class="fld span2"><label class="lbl" for="f-ket">Keterangan</label><input class="in" id="f-ket" value="' + esc(t.ket || '') + '" placeholder="mis. Pembayaran listrik PLN Oktober" autocomplete="off"><div class="hint" id="f-hint"></div></div>' +
     '<div class="fld"><label class="lbl" for="f-jml">Jumlah (Rp)</label><input class="in num-in uang" id="f-jml" inputmode="numeric" value="' + (t.jml ? fmtN.format(t.jml) : '') + '" placeholder="0" autocomplete="off"></div>' +
     (M.cfg.hpp && M.cfg.hpp.aktif && Object.keys(M.cfg.hpp.proyek || {}).length ? '<div class="fld"><label class="lbl" for="f-prj">Proyek <span class="muted">(opsional)</span></label><select class="in" id="f-prj"><option value="">Tanpa proyek</option>' + Object.keys(M.cfg.hpp.proyek).map(k => opt(k, M.cfg.hpp.proyek[k].nama, t.prj || '')).join('') + '</select></div>' : '') +
+    (t.jenis !== 'transfer' && typeof hppIvkSelect === 'function' ? hppIvkSelect(t.ivk || '') : '') +
     (ada && ada.stk && ada.stk.length ? '<div class="fld span2 note">Transaksi ini punya rincian barang (' + ada.stk.length + ' baris). Rinciannya tetap tersimpan; ubah lewat menu HPP &amp; Persediaan &rsaquo; Catatan stok.</div>' : '') + '</div>' +
     '<div class="hint neg" id="f-err" role="alert"></div>';
   const tombol = (ada ? '<button class="btn bahaya" data-act="hapusTx" id="f-hapus">Hapus</button><span class="sp"></span>' : '') +
@@ -2404,6 +2435,8 @@ function simpanTx(lagi) {
   if (lama && lama.inv && (lawan === INV_AKUN.piutang[0] || lawan === INV_AKUN.utang[0])) item.inv = lama.inv;   // tetap terhubung ke invoice
   const prjEl = $('#f-prj'), prj = prjEl ? prjEl.value : (lama && lama.prj) || '';
   if (prj) item.prj = prj;
+  const ivkEl = $('#f-ivk'), ivk = ivkEl ? ivkEl.value : (lama && lama.ivk) || '';
+  if (ivk && T.jenis !== 'transfer') item.ivk = ivk;
   if (lama && lama.stk) item.stk = lama.stk;   // rincian barang (fitur HPP) ikut tersimpan
   if (!Store.simpanTx(item)) return;
   const th = +tgl.slice(0, 4);
@@ -3428,7 +3461,7 @@ function hitungSaldoAwal() {
 
 function vBaganAkun() {
   const rows = M.akun.slice().sort((a, b) => (a.kode < b.kode ? -1 : 1));
-  return '<div class="bar"><span class="note grow">Kode dan nama akun bisa disesuaikan. Akun yang sudah dipakai transaksi tidak bisa dihapus.</span><button class="btn pri" data-act="tambahAkun">' + IC.plus + ' Tambah akun</button></div>' +
+  return (typeof baganCfPanel === 'function' ? baganCfPanel() : '') + '<div class="bar"><span class="note grow">Kode dan nama akun bisa disesuaikan. Akun yang sudah dipakai transaksi tidak bisa dihapus.</span><button class="btn pri" data-act="tambahAkun">' + IC.plus + ' Tambah akun</button></div>' +
     '<div class="tw"><table class="t"><thead><tr><th>Kode</th><th>Nama akun</th><th>Jenis</th><th>Keterangan</th><th></th></tr></thead><tbody>' +
     rows.map(a => '<tr><td class="mono" style="font-size:12px">' + esc(a.kode) + '</td><td>' + esc(a.nama) + '</td><td>' + esc(TIPE[a.tipe] ? TIPE[a.tipe].label : a.tipe) + '</td><td>' + [a.kas ? '<span class="chip acc">Kas / bank</span>' : '', a.normal && a.normal !== TIPE[a.tipe].normal ? '<span class="chip warn">Akun kontra</span>' : '', TIPE[a.tipe].grup !== 'Laba Rugi' && !a.kas && a.arus ? '<span class="chip">Arus ' + esc(a.arus) + '</span>' : ''].join(' ') + '</td><td class="r"><button class="btn sm" data-act="editAkun" data-k="' + esc(a.kode) + '">Ubah</button></td></tr>').join('') + '</tbody></table></div>';
 }
@@ -4092,6 +4125,7 @@ function vInvoice() {
   const th = UI.tahun, f = UI.invoice, hari = hariIni(), semua = invSemua(M, hari);
   const buka = j => semua.filter(i => i.jenis === j && i.sisa > 0.5);
   const jml = (a, k) => a.reduce((s, i) => s + i[k], 0);
+  const HI = M.cfg.hpp && M.cfg.hpp.aktif ? hppInvData() : null;
   const pj = buka('jual'), pb = buka('beli'), pjT = pj.filter(i => i.telat > 0), pbT = pb.filter(i => i.telat > 0);
   let h = kepala('Invoice', 'Tagihan ke pelanggan dan dari pemasok, dengan atau tanpa PPN.',
     (Store.canWrite ? '<button class="btn" data-act="invPdf">Baca dari PDF</button><button class="btn pri" data-act="invBaru">' + IC.plus + ' Invoice</button>' : '') +
@@ -4124,9 +4158,9 @@ function vInvoice() {
   const tampil = js.slice(0, 200);
   h += '<div class="tw"><table class="t"><thead><tr><th>Tanggal</th><th>Invoice</th><th class="r">Tagihan bersih</th><th class="r">Sisa</th><th></th></tr></thead><tbody>' + tampil.map(i =>
     '<tr><td style="white-space:nowrap;vertical-align:top">' + tglFmt(i.tgl) + (i.tempo ? '<div class="k2">tempo ' + tglFmt(i.tempo) + '</div>' : '') + '</td>' +
-    '<td><div class="k1">' + esc(i.pihak || '(tanpa nama)') + '</div><div class="k2">' + (i.no ? esc(i.no) + ' · ' : '') + invJenisTeks(i.jenis) + (i.ppn > 0 ? ' · PPN ' + angka(i.ppn) : '') + (i.pph > 0 ? ' · PPh ' + angka(i.pph) : '') + '</div>' + invChipStatus(i) + '</td>' +
+    '<td><div class="k1">' + esc(i.pihak || '(tanpa nama)') + '</div><div class="k2">' + (i.no ? esc(i.no) + ' · ' : '') + invJenisTeks(i.jenis) + (i.ppn > 0 ? ' · PPN ' + angka(i.ppn) : '') + (i.pph > 0 ? ' · PPh ' + angka(i.pph) : '') + '</div>' + invChipStatus(i) + (HI && HI[i.id] && HI[i.id].ada ? '<div class="k2" style="margin-top:3px">HPP ' + angka(HI[i.id].hpp) + ' · laba ' + angka(HI[i.id].laba) + (isFinite(HI[i.id].margin) ? ' (' + pct(HI[i.id].margin) + ')' : '') + '</div>' : '') + '</td>' +
     '<td class="n">' + angka(i.bersih) + '</td><td class="n' + (i.sisa > 0.5 ? '' : ' muted') + '">' + (i.sisa > 0.5 ? angka(i.sisa) : '–') + '</td>' +
-    '<td class="r" style="white-space:nowrap">' + (Store.canWrite ? (i.sisa > 0.5 ? '<button class="btn sm" data-act="invBayar" data-id="' + esc(i.id) + '">' + (i.jenis === 'jual' ? 'Terima' : 'Bayar') + '</button> ' : '') + '<button class="btn sm ghost" data-act="invEdit" data-id="' + esc(i.id) + '">Ubah</button>' : '') + '</td></tr>').join('') + '</tbody></table></div>';
+    '<td class="r" style="white-space:nowrap">' + (HI && i.jenis === 'jual' ? '<button class="btn sm ghost" data-act="hppInv" data-id="' + esc(i.id) + '">HPP</button> ' : '') + (Store.canWrite ? (i.sisa > 0.5 ? '<button class="btn sm" data-act="invBayar" data-id="' + esc(i.id) + '">' + (i.jenis === 'jual' ? 'Terima' : 'Bayar') + '</button> ' : '') + '<button class="btn sm ghost" data-act="invEdit" data-id="' + esc(i.id) + '">Ubah</button>' : '') + '</td></tr>').join('') + '</tbody></table></div>';
   if (js.length > tampil.length) h += '<p class="note" style="margin-top:8px">Menampilkan ' + tampil.length + ' dari ' + js.length + ' invoice. Persempit dengan filter atau pencarian.</p>';
   return h;
 }
@@ -4249,8 +4283,10 @@ function simpanInvoice() {
   if (kurang.length && !Store.ubahConfig(c => { kurang.forEach(a => { if (!c.akun.some(x => x.kode === a[0])) c.akun.push({ kode: a[0], nama: a[1], tipe: a[2] }); }); }, true)) return;
   const jr = { id: INV.id || uid(), tgl, ket: ket || 'Invoice ' + (v.jenis === 'jual' ? 'penjualan ' : 'pembelian ') + (v.no ? v.no + ' · ' : '') + v.pihak, ref: v.no, baris: invBaris(v), inv: v };
   const lamaJr = INV.id && M.jrById[INV.id];
+  if (lamaJr && lamaJr.tmb) jr.tmb = lamaJr.tmb;   // biaya tambahan pembelian (ongkir, layanan, diskon)
   if (lamaJr && lamaJr.stk) jr.stk = lamaJr.stk;   // rincian barang (fitur HPP) ikut tersimpan
   if (lamaJr && lamaJr.prj) jr.prj = lamaJr.prj;
+  if (lamaJr && lamaJr.ivk) jr.ivk = lamaJr.ivk;   // tautan biaya ke invoice penjualan
   if (!Store.simpanJr(jr)) return;
   const th = +tgl.slice(0, 4); if (th !== UI.tahun) UI.tahun = th;
   const q = INVQ;
@@ -4492,16 +4528,27 @@ function bukaBJ(jenis) {
       '<div class="grid2" style="margin-top:12px"><div class="fld"><label class="lbl" for="bj-tgl">Tanggal</label><input class="in" id="bj-tgl" type="date" value="' + esc(tglDefault()) + '"></div>' +
       '<div class="fld"><label class="lbl" for="bj-no">Nomor <span class="muted">(opsional)</span></label><input class="in" id="bj-no" placeholder="mis. INV-2611-01" autocomplete="off"></div>' +
       '<div class="fld span2"><label class="lbl" for="bj-pihak">' + (j ? 'Pelanggan' : 'Pemasok') + '</label><input class="in" id="bj-pihak" list="bj-pihak-list" placeholder="Nama perusahaan atau orang" autocomplete="off"><datalist id="bj-pihak-list">' + pihakLama.map(p => '<option value="' + esc(p) + '">').join('') + '</datalist></div></div>' +
-      '<div class="lbl" style="margin:14px 0 6px">Barang</div><div id="hl-box">' + hlHtml() + '</div><div class="sum" id="hl-sum" style="margin:10px 0 0"></div>' +
+      '<div class="lbl" style="margin:14px 0 6px">Barang</div><div id="hl-box">' + hlHtml() + '</div>' +
+      (j ? '' : '<div class="lbl" style="margin:14px 0 6px">Biaya tambahan <span class="muted">(opsional, untuk beli online)</span></div>' +
+        '<div class="grid2"><div class="fld"><label class="lbl" for="bj-ong">Ongkir</label><input class="in num-in uang" id="bj-ong" data-hl="x" inputmode="numeric" placeholder="0" autocomplete="off"></div>' +
+        '<div class="fld"><label class="lbl" for="bj-lay">Biaya layanan</label><input class="in num-in uang" id="bj-lay" data-hl="x" inputmode="numeric" placeholder="0" autocomplete="off"></div>' +
+        '<div class="fld span2"><label class="lbl" for="bj-dis">Diskon platform <span class="muted">(voucher, cashback, potongan ongkir)</span></label><input class="in num-in uang" id="bj-dis" data-hl="x" inputmode="numeric" placeholder="0" autocomplete="off"></div></div>') +
+      '<div class="sum" id="hl-sum" style="margin:10px 0 0"></div>' +
       '<div class="grid2" style="margin-top:12px"><div class="fld"><label class="lbl" for="bj-ppn">PPN</label><select class="in" id="bj-ppn" data-act-change="hlLive">' + opt('tanpa', 'Tanpa PPN', 'tanpa') + opt('11', 'PPN 11%', 'tanpa') + opt('12', 'PPN 12%', 'tanpa') + '</select></div>' +
       (j ? '<div class="fld"><label class="lbl" for="bj-akun">Akun pendapatan</label><select class="in" id="bj-akun">' + optAkunGrup(a => !a.kas && (a.tipe === 'pendapatan' || a.tipe === 'pendapatan_lain') && !(INV_AKUN.piutang[0] === a.kode), akunJual) + '</select></div>' : '<div class="fld"><label class="lbl" for="bj-tempo">Jatuh tempo <span class="muted">(opsional)</span></label><input class="in" id="bj-tempo" type="date"></div>') +
       '<div class="fld span2"><label class="lbl" for="bj-bayar">Pembayaran</label><select class="in" id="bj-bayar"><option value="">Belum ' + (j ? 'diterima (jadi piutang)' : 'dibayar (jadi utang)') + '</option>' + M.kasAkun.map(a => '<option value="' + esc(a.kode) + '">Sudah ' + (j ? 'diterima di ' : 'dibayar dari ') + esc(a.nama) + '</option>').join('') + '</select></div></div>' +
-      '<p class="note" style="margin-top:8px">' + (j ? 'Disimpan sebagai invoice penjualan (tampil juga di menu Invoice). Harga pokok barang dihitung otomatis dengan rata-rata bergerak dan masuk jurnal sebagai HPP.' : 'Disimpan sebagai invoice pembelian yang menambah persediaan (tampil juga di menu Invoice). Pilih rekening di atas bila sudah dibayar.') + '</p><div class="hint neg" id="bj-err" role="alert"></div>',
+      '<p class="note" style="margin-top:8px">' + (j ? 'Disimpan sebagai invoice penjualan (tampil juga di menu Invoice). Harga pokok barang dihitung otomatis dengan rata-rata bergerak dan masuk jurnal sebagai HPP.' : 'Disimpan sebagai invoice pembelian yang menambah persediaan (tampil juga di menu Invoice). Ongkir dan biaya layanan ditambahkan ke harga pokok barang, diskon platform mengurangi; dibagi ke tiap barang sebanding nilainya. PPN dihitung dari jumlah barang saja. Pilih rekening di atas bila sudah dibayar.') + '</p><div class="hint neg" id="bj-err" role="alert"></div>',
     tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppBJSimpan">Simpan</button>',
   });
   bjSum();
 }
 function bjPpnRate() { const m = ($('#bj-ppn') || {}).value; return INV_PPN[m] || 0; }
+// biaya tambahan pembelian dari isian (0 bila kosong atau bukan pembelian)
+function bjExtra() {
+  const g = id => { const e = $('#' + id); return e ? Math.max(0, bacaUang(e)) : 0; };
+  const ong = g('bj-ong'), lay = g('bj-lay'), dis = g('bj-dis');
+  return { ong, lay, dis, net: ong + lay - dis };
+}
 function bjSum() {
   const el = $('#hl-sum'); if (!el) return;
   let dpp = 0, hpp = 0, kurang = [];
@@ -4513,8 +4560,12 @@ function bjSum() {
       const s = M.hpp && M.hpp.st[l.b]; if (!s || s.q + 1e-9 < l.q) kurang.push((M.cfg.hpp.barang[l.b] || {}).nama);
     }
   });
-  const ppn = Math.round(dpp * bjPpnRate());
-  el.innerHTML = '<span>Jumlah <b>' + rp(dpp) + '</b></span>' + (ppn ? '<span>PPN <b>' + rp(ppn) + '</b></span><span>Total <b>' + rp(dpp + ppn) + '</b></span>' : '') +
+  const ppn = Math.round(dpp * bjPpnRate()), X = HF.jenis === 'jual' ? { ong: 0, lay: 0, dis: 0, net: 0 } : bjExtra();
+  el.innerHTML = '<span>Jumlah barang <b>' + rp(dpp) + '</b></span>' +
+    (X.ong ? '<span>Ongkir <b>' + rp(X.ong) + '</b></span>' : '') + (X.lay ? '<span>Biaya layanan <b>' + rp(X.lay) + '</b></span>' : '') + (X.dis ? '<span>Diskon <b class="pos">−' + rp(X.dis) + '</b></span>' : '') +
+    (X.net ? '<span>Nilai persediaan <b>' + rp(dpp + X.net) + '</b></span>' : '') +
+    (ppn ? '<span>PPN <b>' + rp(ppn) + '</b></span>' : '') + (ppn || X.net ? '<span>Total dibayar <b>' + rp(dpp + X.net + ppn) + '</b></span>' : '') +
+    (dpp > 0 && dpp + X.net <= 0 ? '<span class="neg">Diskon melebihi total pembelian</span>' : '') +
     (HF.jenis === 'jual' ? '<span>Perkiraan HPP <b>' + rp(hpp) + '</b></span><span>Laba kotor <b class="' + (dpp - hpp < 0 ? 'neg' : 'pos') + '">' + rp(dpp - hpp) + '</b></span>' : '') +
     (kurang.length ? '<span class="neg">Stok ' + esc(kurang.join(', ')) + ' kurang dari jumlah ini (stok sekarang)</span>' : '');
 }
@@ -4524,8 +4575,10 @@ function hppBJSimpan() {
   if (!tglValid(tgl)) { err.textContent = 'Isi tanggal dengan benar.'; return; }
   if (!pihak) { err.textContent = 'Isi nama ' + (j ? 'pelanggan' : 'pemasok') + '.'; $('#bj-pihak').focus(); return; }
   const r = hlAmbil({ harga: true }); if (r.err) { err.textContent = r.err; return; }
-  const dpp = r.lines.reduce((s, l) => s + Math.round(l.q * l.h), 0), ppn = Math.round(dpp * bjPpnRate());
-  if (!(dpp > 0)) { err.textContent = 'Jumlah transaksi harus lebih dari nol.'; return; }
+  const nilaiBaris = r.lines.map(l => Math.round(l.q * l.h)), barang = nilaiBaris.reduce((s, v) => s + v, 0), ppn = Math.round(barang * bjPpnRate());
+  const X = j ? { ong: 0, lay: 0, dis: 0, net: 0 } : bjExtra(), dpp = barang + X.net;   // dpp = nilai yang masuk persediaan (barang + ongkir + layanan − diskon)
+  if (!(barang > 0)) { err.textContent = 'Jumlah transaksi harus lebih dari nol.'; return; }
+  if (!(dpp > 0)) { err.textContent = 'Diskon tidak boleh sebesar atau lebih dari total barang, ongkir, dan biaya layanan.'; $('#bj-dis').focus(); return; }
   const akun = j ? $('#bj-akun').value : (M.cfg.hpp.akunPers || '1-1400');
   if (!akun || !M.am[akun]) { err.textContent = 'Pilih akun.'; return; }
   const tempo = j ? '' : ($('#bj-tempo').value || '');
@@ -4535,9 +4588,11 @@ function hppBJSimpan() {
   const v = { jenis: HF.jenis, no, pihak, tempo, akun, dpp, ppn, pph: 0, ppnMode: ppn ? ($('#bj-ppn').value) : 'tanpa' };
   const kurang = invAkunKurang(v, M.am);
   if (kurang.length && !Store.ubahConfig(c => { kurang.forEach(a => { if (!c.akun.some(x => x.kode === a[0])) c.akun.push({ kode: a[0], nama: a[1], tipe: a[2] }); }); }, true)) return;
-  const stk = r.lines.map(l => (j ? { b: l.b, q: -l.q, jh: l.h } : { b: l.b, q: l.q, h: l.h, n: Math.round(l.q * l.h) }));
+  const nBaris = hppAlokasi(nilaiBaris, X.net);
+  const stk = r.lines.map((l, i) => (j ? { b: l.b, q: -l.q, jh: l.h } : { b: l.b, q: l.q, h: l.h, n: nBaris[i] }));
   const ket = (j ? 'Penjualan barang ' : 'Pembelian barang ') + (no ? no + ' · ' : '') + pihak;
   const jr = { id: uid(), tgl, ket, ref: no, baris: invBaris(v), inv: v, stk };
+  if (X.ong || X.lay || X.dis) jr.tmb = { ong: X.ong, lay: X.lay, dis: X.dis, brg: barang };   // rincian biaya tambahan (untuk ditampilkan)
   if (!Store.simpanJr(jr)) return;
   const bayar = $('#bj-bayar').value;
   if (bayar && !Store.simpanTx({ id: uid(), tgl, jenis: j ? 'masuk' : 'keluar', akun: bayar, lawan: j ? INV_AKUN.piutang[0] : INV_AKUN.utang[0], ket: (j ? 'Pelunasan ' : 'Pembayaran ') + (no ? no + ' ' : '') + pihak, jml: dpp + ppn, ref: no, inv: jr.id })) return;
@@ -4811,6 +4866,71 @@ function hppTautSimpan() {
   toast(n ? n + ' transaksi diperbarui.' : 'Tidak ada perubahan.'); tutupModal();
 }
 
+/* ----- HPP per nomor invoice ----- */
+const hppInvData = () => hppInvoice(M.J, M.am, invSemua(M, hariIni()), M.hpp);
+function bukaInvHpp(id) {
+  const I = hppInvData()[id]; if (!I) return;
+  const H = M.cfg.hpp, tulis = Store.canWrite, nm = b => (H.barang[b] || {}).nama || '(dihapus)';
+  const brg = I.brgBaris.length ? '<div class="panel-h" style="margin:14px 0 6px"><h2>Barang keluar dari stok</h2></div><div class="tw"><table class="t rapat"><thead><tr><th>Barang</th><th class="r">Jumlah</th><th class="r">HPP</th></tr></thead><tbody>' + I.brgBaris.map(x => '<tr><td>' + esc(nm(x.b)) + '</td><td class="n">' + hppJml(x.q) + ' ' + esc((H.barang[x.b] || {}).satuan || '') + '</td><td class="n">' + angka(x.n) + '</td></tr>').join('') + '</tbody></table></div>' : '';
+  const biaya = I.biayaBaris.length ? '<div class="panel-h" style="margin:14px 0 6px"><h2>Biaya langsung tertaut</h2></div><div class="tw"><table class="t rapat"><tbody>' + I.biayaBaris.map(x => '<tr><td><div class="k1">' + esc(x.ket || '(tanpa keterangan)') + '</div><div class="k2">' + tglFmt(x.tgl) + '</div></td><td class="n">' + angka(x.n) + '</td><td class="r">' + (tulis ? '<button class="btn sm ghost" data-act="hppInvLepas" data-k="' + x.kind + '" data-id="' + esc(x.id) + '" data-inv="' + esc(id) + '" aria-label="Lepas tautan">' + IC.tutup + '</button>' : '') + '</td></tr>').join('') + '</tbody></table></div>' : '';
+  bukaModal({
+    judul: 'HPP invoice ' + (I.no || '(tanpa nomor)'), lebar: true, tanpaFokus: true,
+    isi: '<p class="note" style="margin-bottom:10px"><b>' + esc(I.pihak || '(tanpa nama)') + '</b> · ' + tglFmt(I.tgl) + (I.ket ? '<br>' + esc(I.ket) : '') + '</p>' +
+      '<div class="sum"><span>Penjualan (DPP) <b>' + rp(I.dpp) + '</b></span><span>HPP barang <b>' + rp(I.barang) + '</b></span><span>Biaya langsung <b>' + rp(I.biaya) + '</b></span></div>' +
+      '<div class="sum" style="margin-top:6px"><span>Laba kotor <b class="' + (I.laba < 0 ? 'neg' : 'pos') + '">' + rp(I.laba) + '</b></span><span>Margin <b>' + pct(I.margin) + '</b></span></div>' +
+      (I.ada ? '' : '<p class="note" style="margin-top:10px">Invoice ini belum punya data HPP. Isi rincian barang yang dijual, atau tautkan biaya langsungnya (subkon, material, BBM, dan sebagainya).</p>') + brg + biaya,
+    tombol: (tulis ? '<button class="btn" data-act="hppInvRinci" data-id="' + esc(id) + '">Rincian barang</button><button class="btn" data-act="hppInvTaut" data-id="' + esc(id) + '">Tautkan biaya</button><span class="sp"></span>' : '') + '<button class="btn pri" data-act="tutupModal">Tutup</button>',
+  });
+}
+// biaya (akun HPP/beban) yang bisa ditautkan ke invoice: belum ditautkan ke invoice lain
+function hppKandidatInv(iid) {
+  const out = [], ok = a => a && (a.tipe === 'hpp' || a.tipe === 'beban' || a.tipe === 'beban_lain');
+  M.txAll.forEach(t => { if (t.jenis === 'transfer' || !ok(M.am[t.lawan]) || (t.ivk && t.ivk !== iid)) return; out.push({ kind: 'tx', id: t.id, tgl: t.tgl, ket: ketTx(t, M.am), jml: t.jml, ivk: t.ivk || '' }); });
+  Object.keys(M.jrById).forEach(id => {
+    const j = M.jrById[id]; if (j.hs || id === iid || (j.ivk && j.ivk !== iid) || (j.inv && j.inv.jenis === 'jual')) return;
+    const v = (j.baris || []).reduce((s, b) => s + (ok(M.am[b.akun]) ? (b.d || 0) - (b.k || 0) : 0), 0);
+    if (Math.abs(v) >= 0.5) out.push({ kind: 'jr', id, tgl: j.tgl, ket: j.ket || j.ref || '', jml: Math.abs(v), ivk: j.ivk || '' });
+  });
+  out.sort((a, b) => ((b.ivk === iid) - (a.ivk === iid)) || (a.tgl < b.tgl ? 1 : a.tgl > b.tgl ? -1 : 0));
+  return out;
+}
+function bukaTautInv(iid) {
+  if (!hppBolehTulis()) return;
+  const I = hppInvData()[iid]; if (!I) return;
+  HF = { f: 'tautinv', iid, lim: 60, label: (I.no || '(tanpa nomor)') + ' · ' + (I.pihak || '') };
+  HF.kand = hppKandidatInv(iid); HF.pilih = new Set(HF.kand.filter(k => k.ivk === iid).map(k => k.kind + ':' + k.id));
+  bukaModal({ judul: 'Tautkan biaya ke invoice', lebar: true, tanpaFokus: true, isi: tautInvHtml(), tombol: '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppTautInvSimpan">Simpan</button>' });
+}
+function tautInvHtml() {
+  const q = ($('#tt-q') || {}).value || '';
+  const daftar = HF.kand.filter(k => !q || (k.ket + ' ' + k.tgl).toLowerCase().indexOf(q.toLowerCase()) >= 0).slice(0, HF.lim);
+  return '<p class="note" style="margin-bottom:8px">Centang biaya yang menjadi harga pokok invoice <b>' + esc(HF.label) + '</b>. Hanya biaya (akun HPP atau beban) yang belum ditautkan ke invoice lain yang tampil.</p>' +
+    '<input class="in" id="tt-q" type="search" placeholder="Cari keterangan" value="' + esc(q) + '" style="margin:6px 0 10px">' +
+    '<div class="tw" style="max-height:46vh;overflow:auto"><table class="t"><tbody>' + (daftar.length ? daftar.map(k => '<tr><td style="width:34px"><input type="checkbox" data-tk="' + esc(k.kind + ':' + k.id) + '" data-act-change="hppTautPilih"' + (HF.pilih.has(k.kind + ':' + k.id) ? ' checked' : '') + ' aria-label="Tautkan ' + esc(k.ket) + '"></td><td><div class="k1">' + esc(k.ket || '(tanpa keterangan)') + '</div><div class="k2">' + tglFmt(k.tgl) + '</div></td><td class="n">' + angka(k.jml) + '</td></tr>').join('') : '<tr><td class="muted">Tidak ada biaya yang cocok.</td></tr>') + '</tbody></table></div>' +
+    (HF.kand.length > daftar.length ? '<p class="note" style="margin-top:6px">Menampilkan ' + daftar.length + ' dari ' + HF.kand.length + '. Gunakan pencarian untuk mempersempit.</p>' : '');
+}
+function hppTautInvSimpan() {
+  const iid = HF.iid; let n = 0;
+  HF.kand.forEach(k => {
+    const mau = HF.pilih.has(k.kind + ':' + k.id), kini = k.ivk === iid; if (mau === kini) return;
+    const rec = Object.assign({}, k.kind === 'tx' ? M.txById[k.id] : M.jrById[k.id]);
+    if (mau) rec.ivk = iid; else delete rec.ivk;
+    if (k.kind === 'tx' ? Store.simpanTx(rec) : Store.simpanJr(rec)) n++;
+  });
+  toast(n ? n + ' biaya diperbarui.' : 'Tidak ada perubahan.'); tutupModal(); bukaInvHpp(iid);
+}
+function hppInvLepas(el) {
+  const rec = Object.assign({}, el.dataset.k === 'tx' ? M.txById[el.dataset.id] : M.jrById[el.dataset.id]); if (!rec.id) return;
+  delete rec.ivk; (el.dataset.k === 'tx' ? Store.simpanTx(rec) : Store.simpanJr(rec)); bukaInvHpp(el.dataset.inv);
+}
+// pilihan "untuk invoice" di formulir transaksi (opsional, hanya bila fitur HPP aktif)
+function hppIvkSelect(sel) {
+  if (!(M.cfg.hpp && M.cfg.hpp.aktif)) return '';
+  const l = invSemua(M, hariIni()).filter(i => i.jenis === 'jual'); if (!l.length) return '';
+  const tampil = l.slice(0, 150); if (sel && !tampil.some(i => i.id === sel)) { const x = l.find(i => i.id === sel); if (x) tampil.push(x); }
+  return '<div class="fld"><label class="lbl" for="f-ivk">Biaya untuk invoice <span class="muted">(opsional)</span></label><select class="in" id="f-ivk"><option value="">Tidak terkait invoice</option>' + tampil.map(i => opt(i.id, (i.no || '(tanpa nomor)') + ' · ' + (i.pihak || '') + ' · ' + tglFmt(i.tgl), sel || '')).join('') + '</select><div class="hint">Biaya langsung yang ditautkan ikut dihitung sebagai HPP invoice itu.</div></div>';
+}
+
 /* ----- kartu stok ----- */
 function bukaKartu(b) {
   const H = hppH(), br = H && H.barang[b]; if (!br) return;
@@ -4842,6 +4962,7 @@ const ACT_HPP = {
   hppResepBaru() { bukaResep(null); }, hppResepUbah(el) { bukaResep(el.dataset.id); }, hppResepSimpan() { hppResepSimpan(); }, hppResepHapus(el) { hppResepHapus(el); },
   hppProyekBaru() { bukaProyek(null); }, hppProyekUbah(el) { bukaProyek(el.dataset.id); }, hppProyekSimpan() { hppProyekSimpan(); }, hppProyekHapus(el) { hppProyekHapus(el); },
   hppTaut(el) { bukaTaut(el.dataset.id); }, hppTautSimpan() { hppTautSimpan(); },
+  hppInv(el) { bukaInvHpp(el.dataset.id); }, hppInvRinci(el) { tutupModal(); bukaRincian('jr', el.dataset.id); }, hppInvTaut(el) { bukaTautInv(el.dataset.id); }, hppTautInvSimpan() { hppTautInvSimpan(); }, hppInvLepas(el) { hppInvLepas(el); },
   hlTambah() { hlBaca(); HF.lines.push({ b: '', q: '', h: '' }); hlGambar(); },
   hlHapus(el) { hlBaca(); HF.lines.splice(+el.dataset.i, 1); if (!HF.lines.length) HF.lines.push({ b: '', q: '', h: '' }); hlGambar(); },
   tabHpp(el) { UI.hpp.tab = el.dataset.t; render(); },
@@ -4867,7 +4988,7 @@ const ACTC_HPP = {
   hppProdResep() { hppProdResep(); },
   hppTautGanti(el) { HF.pid = el.value; tautMuat(); const b = $('.md-b'); if (b) b.innerHTML = tautHtml(); },
   hppTautPilih(el) { if (el.checked) HF.pilih.add(el.dataset.tk); else HF.pilih.delete(el.dataset.tk); },
-  hppTautCari() { const b = $('.md-b'); if (!b) return; const q = $('#tt-q').value; b.innerHTML = tautHtml(); const e = $('#tt-q'); e.value = q; e.focus(); e.setSelectionRange(q.length, q.length); },
+  hppTautCari() { const b = $('.md-b'); if (!b) return; const q = $('#tt-q').value; b.innerHTML = HF.f === 'tautinv' ? tautInvHtml() : tautHtml(); const e = $('#tt-q'); e.value = q; e.focus(); e.setSelectionRange(q.length, q.length); },
 };
 
 /* ===== hpp_ui.js ===== */
@@ -4896,9 +5017,10 @@ function vHpp() {
     '<div class="tile"><div class="k">Saldo akun Persediaan</div><div class="v">' + rpV(gl) + '</div><div class="d">' + (Math.abs(selisih) < 1 ? '<span class="chip ok">Sama dengan stok</span>' : '<span class="chip warn">Selisih ' + rp(selisih) + '</span>') + '</div></div>' +
     '<div class="tile"><div class="k">HPP tahun ' + th + '</div><div class="v">' + rpV(hppTh) + '</div><div class="d"><span>Otomatis dari penjualan barang</span></div></div>' +
     '<div class="tile"><div class="k">Perlu diperhatikan</div><div class="v">' + (nBr + R.peringatan.length) + '</div><div class="d"><span>' + nBr + ' perlu rincian · ' + R.peringatan.length + ' peringatan</span></div></div></section>';
-  h += tabsHtml([['stok', 'Stok'], ['catatan', 'Catatan stok'], ['laporan', 'Laporan HPP'], ['resep', 'Resep'], ['proyek', 'Proyek']], f.tab, 'tabHpp');
+  h += tabsHtml([['stok', 'Stok'], ['catatan', 'Catatan stok'], ['laporan', 'Laporan HPP'], ['invoice', 'Per Invoice'], ['resep', 'Resep'], ['proyek', 'Proyek']], f.tab, 'tabHpp');
   if (f.tab === 'catatan') return h + hppTabCatatan(H, R);
   if (f.tab === 'laporan') return h + hppTabLaporan(H, R);
+  if (f.tab === 'invoice') return h + hppTabInvoice(H, R);
   if (f.tab === 'resep') return h + hppTabResep(H, R);
   if (f.tab === 'proyek') return h + hppTabProyek(H, R);
   return h + hppTabStok(H, R, br, selisih);
@@ -4949,13 +5071,23 @@ function hppCatatanDaftar(H, R) {
     return { e, jenis, nilai, ringkas: nama.slice(0, 2).join(', ') + (nama.length > 2 ? ' +' + (nama.length - 2) : '') };
   }).reverse();
 }
+// keterangan singkat biaya tambahan pembelian, mis. " · barang 100.000 + ongkir 10.000 − diskon 5.000"
+function hppTmbTeks(t) {
+  if (!t || !(t.ong || t.lay || t.dis)) return '';
+  const p = [];
+  if (t.brg) p.push('barang ' + angka(t.brg));
+  if (t.ong) p.push('+ ongkir ' + angka(t.ong));
+  if (t.lay) p.push('+ layanan ' + angka(t.lay));
+  if (t.dis) p.push('− diskon ' + angka(t.dis));
+  return '<div class="k2" style="margin-top:2px">' + esc(p.join(' ')) + '</div>';
+}
 function hppTabCatatan(H, R) {
   const tulis = Store.canWrite, th = String(UI.tahun);
   const semua = hppCatatanDaftar(H, R), daftar = semua.filter(c => c.e.tgl.slice(0, 4) === th);
   let h = '<div class="bar">' + (tulis ? '<button class="btn pri" data-act="hppProduksi">' + IC.plus + ' Produksi</button><button class="btn" data-act="hppOpname">Stok opname</button><button class="btn" data-act="hppAwal">Stok awal</button><button class="btn" data-act="hppBeli">Pembelian</button><button class="btn" data-act="hppJual">Penjualan</button>' : '') + '</div>';
   if (!daftar.length) return h + '<div class="panel"><div class="empty"><b>Belum ada catatan stok tahun ' + th + '.</b>Pembelian, penjualan, produksi, opname, dan stok awal yang kamu catat muncul di sini.' + (semua.length ? ' Ada ' + semua.length + ' catatan di tahun lain; ganti tahun buku di kanan atas.' : '') + '</div></div>';
   const kls = { 'Pembelian': 'acc', 'Penjualan': 'ok', 'Produksi': 'warn', 'Opname': '', 'Stok awal': '' };
-  return h + '<div class="tw"><table class="t"><thead><tr><th>Catatan</th><th class="r">Nilai</th><th></th></tr></thead><tbody>' + daftar.map(c => '<tr><td><div class="k1">' + esc(c.e.ket || c.ringkas) + '</div><div class="k2">' + tglFmt(c.e.tgl) + ' · <span class="chip ' + (kls[c.jenis] || '') + '">' + c.jenis + '</span> ' + esc(c.ringkas) + '</div></td><td class="n">' + angka(c.nilai) + '</td><td class="r">' + (tulis ? '<button class="btn sm" data-act="hppCatatanUbah" data-k="' + c.e.sumber + '" data-id="' + esc(c.e.id) + '">' + (c.e.k === 'tx' || c.e.k === 'jr' ? 'Rincian' : 'Ubah') + '</button>' : '') + '</td></tr>').join('') + '</tbody></table></div><p class="note" style="margin-top:8px">Pembelian dan penjualan mengubah tanggal, nilai, atau pihaknya lewat menu Kas &amp; Bank atau Invoice. Rincian barangnya diubah di sini.</p>';
+  return h + '<div class="tw"><table class="t"><thead><tr><th>Catatan</th><th class="r">Nilai</th><th></th></tr></thead><tbody>' + daftar.map(c => '<tr><td><div class="k1">' + esc(c.e.ket || c.ringkas) + '</div><div class="k2">' + tglFmt(c.e.tgl) + ' · <span class="chip ' + (kls[c.jenis] || '') + '">' + c.jenis + '</span> ' + esc(c.ringkas) + (c.e.rec && c.e.rec.inv && c.e.rec.inv.no ? ' · <span class="mono" style="font-size:12px">' + esc(c.e.rec.inv.no) + '</span>' : '') + hppTmbTeks(c.e.rec && c.e.rec.tmb) + '</div></td><td class="n">' + angka(c.nilai) + '</td><td class="r">' + (tulis ? '<button class="btn sm" data-act="hppCatatanUbah" data-k="' + c.e.sumber + '" data-id="' + esc(c.e.id) + '">' + (c.e.k === 'tx' || c.e.k === 'jr' ? 'Rincian' : 'Ubah') + '</button>' : '') + '</td></tr>').join('') + '</tbody></table></div><p class="note" style="margin-top:8px">Pembelian dan penjualan mengubah tanggal, nilai, atau pihaknya lewat menu Kas &amp; Bank atau Invoice. Rincian barangnya diubah di sini.</p>';
 }
 
 function hppTabLaporan(H, R) {
@@ -4989,12 +5121,35 @@ function hppTabProyek(H, R) {
   return h + '<div class="tw"><table class="t"><thead><tr><th>Proyek</th><th class="r">Pendapatan</th><th class="r">Biaya langsung</th><th class="r">Laba kotor</th><th></th></tr></thead><tbody>' + rows + '</tbody><tfoot><tr><th>Total</th><th class="r n">' + angka(tp) + '</th><th class="r n">' + angka(tb) + '</th><th class="r n">' + angka(tp - tb) + '</th><th></th></tr></tfoot></table></div><p class="note" style="margin-top:8px">Dihitung dari transaksi dan invoice yang ditautkan ke proyek (semua tahun). Biaya langsung mencakup akun HPP dan beban yang ditautkan.</p>';
 }
 
+function hppTabInvoice(H, R) {
+  const f = UI.hpp, th = String(UI.tahun), I = hppInvData();
+  const semua = Object.keys(I).map(k => I[k]).filter(o => o.tgl.slice(0, 4) === th);
+  const tanpa = semua.filter(o => !o.ada).length;
+  const sum = k => semua.reduce((s, o) => s + o[k], 0), dpp = sum('dpp'), hpp = sum('hpp'), laba = dpp - hpp;
+  let js = semua.slice().sort((a, b) => (a.tgl < b.tgl ? 1 : a.tgl > b.tgl ? -1 : a.no < b.no ? 1 : -1));
+  if (f.inv === 'tanpa') js = js.filter(o => !o.ada); else if (f.inv === 'ada') js = js.filter(o => o.ada);
+  if (f.iq) { const q = f.iq.toLowerCase(); js = js.filter(o => (o.no + ' ' + o.pihak + ' ' + o.ket).toLowerCase().indexOf(q) >= 0); }
+  if (!semua.length) return '<div class="panel"><div class="empty"><b>Belum ada invoice penjualan tahun ' + th + '.</b>Catat invoice penjualan di menu Invoice (atau lewat tombol Penjualan di menu ini). HPP dan laba kotor tiap nomor invoice muncul di sini.</div></div>';
+  let h = '<div class="sum" style="margin-bottom:10px"><span>Penjualan <b>' + rp(dpp) + '</b></span><span>HPP <b>' + rp(hpp) + '</b></span><span>Laba kotor <b class="' + (laba < 0 ? 'neg' : 'pos') + '">' + rp(laba) + '</b></span><span>Margin <b>' + pct(dpp ? laba / dpp : NaN) + '</b></span>' + (tanpa ? '<span class="chip warn">' + tanpa + ' invoice belum ada HPP</span>' : '<span class="chip ok">Semua invoice punya HPP</span>') + '</div>';
+  h += '<div class="bar"><select class="in" data-ui="hpp.inv" aria-label="Filter invoice" style="width:auto">' + opt('', 'Semua invoice', f.inv) + opt('tanpa', 'Belum ada HPP', f.inv) + opt('ada', 'Sudah ada HPP', f.inv) + '</select>' +
+    '<input class="in" type="search" data-uiq="hpp.iq" value="' + esc(f.iq) + '" placeholder="Cari nomor atau pelanggan" aria-label="Cari invoice" style="flex:1 1 180px;min-width:0"></div>';
+  if (!js.length) return h + '<div class="panel"><div class="empty"><b>Tidak ada invoice yang cocok.</b>Ubah filter atau pencarian.</div></div>';
+  const tampil = js.slice(0, 200);
+  h += '<div class="tw"><table class="t"><thead><tr><th>Invoice</th><th class="r">Penjualan</th><th class="r">HPP</th><th class="r">Laba kotor</th></tr></thead><tbody>' + tampil.map(o =>
+    '<tr class="klik" data-act="hppInv" data-id="' + esc(o.id) + '"><td><div class="k1">' + esc(o.pihak || '(tanpa nama)') + '</div><div class="k2"><span class="mono" style="font-size:12px">' + esc(o.no || '(tanpa nomor)') + '</span> · ' + tglFmt(o.tgl) + '</div></td>' +
+    '<td class="n">' + angka(o.dpp) + '</td><td class="n">' + (o.ada ? angka(o.hpp) : '<span class="muted">–</span>') + '</td><td class="n">' + (o.ada ? angka(o.laba) + '<div class="k2">' + pct(o.margin) + '</div>' : '<span class="chip warn">Belum ada</span>') + '</td></tr>').join('') + '</tbody></table></div>';
+  if (js.length > tampil.length) h += '<p class="note" style="margin-top:8px">Menampilkan ' + tampil.length + ' dari ' + js.length + ' invoice. Persempit dengan filter atau pencarian.</p>';
+  return h + '<p class="note" style="margin-top:10px">HPP invoice = barang keluar dari stok (rincian barang pada invoice) + biaya langsung yang ditautkan ke invoice itu. Ketuk baris untuk melihat rinciannya, mengisi rincian barang, atau menautkan biaya.</p>';
+}
+
 /* ----- Excel ----- */
 function unduhHpp() {
   if (!pastikanXlsx()) return;
   const H = M.cfg.hpp, R = M.hpp, th = UI.tahun, wb = XLSX.utils.book_new(), add = (ws, n) => XLSX.utils.book_append_sheet(wb, ws, n);
   const K = kolomLaporan(th, 'tahun', 'banding'), L = hppLines(R, K.cols, M), nm = b => (H.barang[b] || {}).nama || '(dihapus)';
   add(buatSheet(statementAoa('Laporan Harga Pokok Penjualan', 'Untuk periode ' + K.e.label, L.lines, K.cols, K.delta)), 'Laporan HPP');
+  { const I = hppInvData(), li = Object.keys(I).map(k => I[k]).filter(o => o.tgl.slice(0, 4) === String(th)).sort((a, b) => (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : 0));
+    if (li.length) add(sheetTabel('HPP per nomor invoice', 'Invoice penjualan tahun ' + th, ['Tanggal', 'No. invoice', 'Pelanggan', 'Penjualan (DPP)', 'HPP barang', 'Biaya langsung', 'HPP total', 'Laba kotor', 'Margin'], li.map(o => [serialExcel(o.tgl), o.no || '', o.pihak || '', o.dpp, o.barang, o.biaya, o.hpp, o.laba, isFinite(o.margin) ? o.margin : '']), [FMT_TGL, null, null, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, '0.0%'], [12, 22, 30, 16, 16, 16, 16, 16, 10]), 'HPP per Invoice'); }
   const ids = Object.keys(H.barang).sort((a, b) => H.barang[a].nama.localeCompare(H.barang[b].nama, 'id'));
   add(sheetTabel('Stok barang', 'Per ' + tglPanjang(hariIni()), ['Barang', 'Kode', 'Jenis', 'Satuan', 'Stok', 'HPP rata-rata', 'Nilai'], ids.map(id => { const b = H.barang[id], s = R.st[id] || { q: 0, n: 0, avg: 0 }; return [b.nama, b.kode || '', HPP_JENIS[b.jenis] || '', b.satuan || '', s.q, Math.round(s.q > 1e-9 ? s.n / s.q : s.avg), s.n]; }), [null, null, null, null, '#,##0.######', FMT_ANGKA, FMT_ANGKA], [34, 14, 22, 10, 12, 16, 18]), 'Stok');
   const tp = { beli: 'Pembelian', jual: 'Penjualan', awal: 'Stok awal', opname: 'Opname', 'prod-masuk': 'Hasil produksi', 'prod-keluar': 'Bahan produksi' };
@@ -5006,6 +5161,86 @@ function unduhHpp() {
   if (pj.length) { const P = hppProyek(M.J, M.am, H); add(sheetTabel('Laba kotor per proyek', 'Semua tahun', ['Proyek', 'Pelanggan', 'Status', 'Nilai kontrak', 'Pendapatan', 'Biaya langsung', 'Laba kotor', 'Margin'], pj.map(id => { const p = P[id], pr = H.proyek[id]; return [pr.nama, pr.pihak || '', pr.status === 'selesai' ? 'Selesai' : 'Berjalan', p.kontrak, p.pendapatan, p.biaya, p.laba, isFinite(p.margin) ? p.margin : '']; }), [null, null, null, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_ANGKA, FMT_PCT], [30, 24, 12, 16, 16, 16, 16, 10]), 'Proyek'); }
   simpanBerkas('hpp-' + th + '-' + slug(M.cfg.perusahaan.nama) + '.xlsx', XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
 }
+
+/* ===== bagan_cf.js ===== */
+/* ===== Kode akun dari berkas Cash Flow 2025 (PT Radhika Tri Naraputra) =====
+   Daftar ini diambil dari kolom "Kode Akun" di sheet CASH IN FLOW dan CASH OUT FLOW.
+   Nama akun dibuat dari keterangan baris-barisnya dan bisa diubah di Pengaturan > Bagan Akun.
+   [kode, nama, jenis, tambahan] */
+const BAGAN_CF = [
+  ['1251', 'Kasbon Karyawan', 'aset_lancar'],
+  ['1252', 'Gadai Ruko (Kantor)', 'aset_tetap'],
+  ['1253', 'Piutang Talangan BPJS', 'aset_lancar'],
+  ['2106', 'Utang PPN', 'kewajiban_pendek'],
+  ['2107', 'Utang Pinjaman Perorangan', 'kewajiban_pendek', { arus: 'pendanaan' }],
+  ['2108', 'Utang Kartu Kredit, Bank BRI & Spaylater', 'kewajiban_pendek', { arus: 'pendanaan' }],
+  ['2109', 'Utang Bank WOM', 'kewajiban_pendek', { arus: 'pendanaan' }],
+  ['2110', 'Utang Bank Allo', 'kewajiban_pendek', { arus: 'pendanaan' }],
+  ['2111', 'Utang Spinjam', 'kewajiban_pendek', { arus: 'pendanaan' }],
+  ['2112', 'Utang Cicilan Akulaku', 'kewajiban_pendek', { arus: 'pendanaan' }],
+  ['2201', 'Utang Pinjaman BPJS', 'kewajiban_panjang'],
+  ['4100', 'Pendapatan Invoice PT Semen Jawa', 'pendapatan'],
+  ['4201', 'Pendapatan Invoice PT MDS, GSI, KINO & SGB', 'pendapatan'],
+  ['4301', 'Pendapatan Invoice PT GLB, HAI & Goalpara Tea Park', 'pendapatan'],
+  ['4401', 'Pendapatan Bunga Bank', 'pendapatan_lain'],
+  ['5102', 'Gaji Lembur (OT) Karyawan', 'hpp'],
+  ['5103', 'THR Karyawan', 'hpp'],
+  ['5104', 'Kompensasi Kontrak', 'hpp'],
+  ['5201', 'Biaya Maintenance, Project AC & Jasa Pihak Ketiga', 'hpp'],
+  ['5202', 'Biaya Operasional Proyek (BBM & Lapangan)', 'hpp'],
+  ['5301', 'Pembelian Barang', 'hpp'],
+  ['6101', 'Gaji Karyawan & Pimpinan', 'beban'],
+  ['6102', 'BPJS Kesehatan', 'beban'],
+  ['6103', 'BPJS Ketenagakerjaan', 'beban'],
+  ['6104', 'Biaya Kesehatan', 'beban'],
+  ['6202', 'Biaya Internet', 'beban'],
+  ['6203', 'Biaya Cleaning Service', 'beban'],
+  ['6301', 'ATK & Keperluan Kantor', 'beban'],
+  ['6302', 'Biaya Operasional Pimpinan & Pengembangan Usaha', 'beban'],
+  ['6303', 'Biaya Entertain & Konsumsi', 'beban'],
+  ['6304', 'Biaya Notaris', 'beban'],
+  ['6305', 'Biaya Bank Garansi', 'beban'],
+  ['6499', 'Reimburs & Beban Operasional Lainnya', 'beban'],
+  ['6501', 'Biaya Kendaraan (Bengkel, Ban & Jok)', 'beban'],
+  ['6502', 'Biaya Operasional Perjalanan', 'beban'],
+  ['6503', 'Biaya Sumbangan', 'beban'],
+  ['7202', 'Biaya Administrasi Bank & Pajak Bunga', 'beban_lain'],
+  ['7203', 'Bunga Pinjaman Operasional', 'beban_lain'],
+  ['7204', 'Denda BPJS & STP Pajak', 'beban_lain'],
+  ['7205', 'Biaya Referensi Bank', 'beban_lain'],
+];
+
+// Akun dari daftar di atas yang belum ada di bagan akun. Kode yang sudah dipakai akun lain dilewati.
+function baganCfStatus(cfg) {
+  const ada = {}; (cfg.akun || []).forEach(a => { ada[a.kode] = a; });
+  const baru = [], sudah = [], bentrok = [];
+  BAGAN_CF.forEach(r => {
+    const a = ada[r[0]];
+    if (!a) baru.push(r); else if (a.nama === r[1] && a.tipe === r[2]) sudah.push(r); else bentrok.push({ r, a });
+  });
+  return { baru, sudah, bentrok };
+}
+function baganCfObjek(r) { return Object.assign({ kode: r[0], nama: r[1], tipe: r[2] }, r[3] || {}); }
+
+function baganCfPanel() {
+  const s = baganCfStatus(M.cfg);
+  const daftar = s.baru.length ? '<details style="margin-top:10px"><summary class="note" style="cursor:pointer">Lihat ' + s.baru.length + ' akun yang akan ditambahkan</summary>' +
+    '<div class="tw" style="margin-top:8px"><table class="t rapat"><thead><tr><th>Kode</th><th>Nama akun</th><th>Jenis</th></tr></thead><tbody>' +
+    s.baru.map(r => '<tr><td class="mono" style="font-size:12px">' + esc(r[0]) + '</td><td>' + esc(r[1]) + '</td><td>' + esc(TIPE[r[2]].label) + '</td></tr>').join('') + '</tbody></table></div></details>' : '';
+  const bentrok = s.bentrok.length ? '<p class="note" style="margin-top:8px">' + s.bentrok.length + ' kode sudah dipakai akun lain dan tidak diubah: ' + s.bentrok.map(b => esc(b.r[0] + ' (' + b.a.nama + ')')).join(', ') + '.</p>' : '';
+  return '<div class="panel" style="margin-bottom:14px"><div class="panel-h"><h2>Kode akun dari Cash Flow 2025</h2>' + (s.baru.length ? '<span class="chip warn">' + s.baru.length + ' belum ada</span>' : '<span class="chip ok">Lengkap</span>') + '</div>' +
+    '<p class="note">' + (s.baru.length
+      ? BAGAN_CF.length + ' kode akun dari berkas Cash Flow (sheet Inflow dan Outflow) bisa ditambahkan ke bagan akun. Akun yang sudah ada tidak diubah atau dihapus, jadi transaksi lama tetap aman. Nama akun bisa Anda ubah sesudahnya.'
+      : (s.bentrok.length ? 'Kode akun lainnya dari berkas Cash Flow sudah ada di bagan akun.' : 'Semua ' + BAGAN_CF.length + ' kode akun dari berkas Cash Flow sudah ada di bagan akun.')) + '</p>' + daftar + bentrok +
+    (s.baru.length ? '<div style="margin-top:12px"><button class="btn pri" data-act="baganCfTambah">' + IC.plus + ' Tambahkan ' + s.baru.length + ' akun</button></div>' : '') + '</div>';
+}
+
+const ACT_CF = {
+  baganCfTambah() {
+    const s = baganCfStatus(M.cfg); if (!s.baru.length) { toast('Semua kode akun sudah ada.'); return; }
+    if (Store.ubahConfig(c => { const ada = new Set(c.akun.map(a => a.kode)); s.baru.forEach(r => { if (!ada.has(r[0])) c.akun.push(baganCfObjek(r)); }); })) toast(s.baru.length + ' akun ditambahkan ke bagan akun.');
+  },
+};
 
 /* ===== export.js ===== */
 /* ================= Ekspor: Excel (SheetJS) & PDF (jsPDF) ================= */
@@ -5475,7 +5710,7 @@ const ACT = {
   unduhExcel() { unduhExcel(); },
   unduhPdf() { unduhPdf(); },
 };
-Object.assign(ACT, ACT_SYNC, ACT_SPT, ACT_INV, ACT_HPP);
+Object.assign(ACT, ACT_SYNC, ACT_SPT, ACT_INV, ACT_HPP, ACT_CF);
 const ACTC = {
   txAkun() { if (TX && TX.jenis === 'transfer') isiLawan('transfer', $('#f-lawan').value); },
   simpanTeks(el) {
@@ -5533,7 +5768,7 @@ document.addEventListener('input', e => {
     return;
   }
   if (t.dataset && t.dataset.hl && HF) { hlLive(); return; }
-  if (t.id === 'tt-q' && HF && HF.f === 'taut') { ACTC.hppTautCari(); return; }
+  if (t.id === 'tt-q' && HF && (HF.f === 'taut' || HF.f === 'tautinv')) { ACTC.hppTautCari(); return; }
   if (t.dataset && t.dataset.uiq) { clearTimeout(tunda); tunda = setTimeout(() => { setUiPath(t.dataset.uiq, t.value); render(); }, 140); return; }
   if (t.id === 'f-ket') { saranAkun(); return; }
   if (t.id === 'jr-ket') return;

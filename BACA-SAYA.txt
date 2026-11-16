@@ -54,5 +54,22 @@ CATATAN
    HPP per produk dari resep, dan laba per proyek untuk usaha jasa/proyek. Semua bisa diunduh ke Excel.
    Jumlah stok dan nilainya dihitung dari catatan stok; bandingkan dengan saldo akun Persediaan di
    buku besar (ada penanda selisih). Ini alat bantu pembukuan, bukan nasihat pajak.
+ - Pembelian barang (menu HPP & Persediaan > Pembelian) punya isian Ongkir, Biaya layanan, dan Diskon platform
+   (voucher, cashback, potongan ongkir) untuk belanja online. Ongkir dan biaya layanan ditambahkan ke harga
+   pokok barang, diskon mengurangi. Totalnya dibagi ke tiap barang sebanding dengan nilainya, jadi HPP rata-rata
+   per kg/pcs sudah memuat semuanya dan masuk Laba Rugi saat barangnya terjual. PPN dihitung dari jumlah barang
+   saja. Total yang dibayar = barang + ongkir + biaya layanan - diskon + PPN. Rinciannya tampil di tab Catatan stok.
+   Isian ini hanya ada di Pembelian (bukan Penjualan).
+ - HPP nyambung ke nomor invoice. Tiap invoice penjualan menampilkan penjualan (DPP), HPP, laba kotor, dan
+   margin. Lihat lewat tombol "HPP" di baris invoice (menu Invoice) atau tab "Per Invoice" di menu HPP &
+   Persediaan (ada filter dan cari nomor/pelanggan, bisa diunduh ke Excel). HPP satu invoice terdiri dari
+   (1) HPP barang: tombol "Rincian barang" mencatat barang yang terjual untuk invoice itu, dan (2) biaya
+   langsung: tombol "Tautkan biaya" menautkan transaksi yang sudah ada (subkon, material, BBM, gaji proyek).
+   Transaksi baru juga bisa ditautkan lewat isian "Biaya untuk invoice" di formulir transaksi. Hanya biaya
+   (akun HPP/beban) yang dihitung; pembayaran utang tidak dihitung dua kali. Invoice yang belum punya HPP
+   ditandai "Belum ada HPP". Menautkan tidak mengubah angka Laba Rugi, hanya menambah rincian per invoice.
+ - Kode akun dari berkas Cash Flow 2025 (PT Radhika) bisa dimasukkan sekali tekan: Pengaturan > Bagan Akun,
+   tekan "Tambahkan ... akun". Ada 40 kode (1251, 2107, 4201, 5301, 6101, 7203, dan seterusnya) dengan nama dan
+   jenis akun yang dibuat dari keterangan barisnya. Akun lama tidak dihapus, nama bisa diubah lewat tombol Ubah.
  - Memperbarui aplikasi: unggah ulang folder versi baru ke tempat yang sama (index.html dan sw.js
    wajib ikut diganti agar versi baru terpasang).
