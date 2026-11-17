@@ -1222,6 +1222,74 @@ function hppInvoice(J, am, list, R) {
   return out;
 }
 
+/* ----- saran penautan biaya ke nomor invoice (otomatis; hasilnya dicek pengguna sebelum diterapkan) -----
+   Biaya (akun HPP/beban) yang belum ditautkan dicocokkan ke invoice penjualan lewat tiga petunjuk, dari yang paling pasti:
+   1. nomor invoice disebut di keterangan atau referensi biaya,
+   2. proyek yang sama (biaya dan invoice ditautkan ke proyek yang sama),
+   3. nama pelanggan atau singkatannya disebut di keterangan (hanya untuk akun HPP), lalu dipilih invoice pelanggan itu
+      yang tanggalnya terdekat setelah biaya (maksimal 120 hari), atau sebelumnya (maksimal 45 hari).
+   Hasil: { saran: [{ kind, id, tgl, ket, jml, iid, alasan }], kandidat } */
+const HPP_STOP = new Set(['pt', 'cv', 'ud', 'pd', 'tbk', 'persero', 'yayasan', 'koperasi', 'dan', 'the', 'toko', 'pusat', 'cabang', 'indonesia', 'nusantara']);
+const hppKata = s => String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 3 && !/^\d+$/.test(w) && !HPP_STOP.has(w));
+function hppSaranTaut(M, list) {
+  const am = M.am, beban = a => a && (a.tipe === 'hpp' || a.tipe === 'beban' || a.tipe === 'beban_lain');
+  const nilai = baris => (baris || []).reduce((s, b) => s + (beban(am[b.akun]) ? (b.d || 0) - (b.k || 0) : 0), 0);
+  const adaHpp = baris => (baris || []).some(b => am[b.akun] && am[b.akun].tipe === 'hpp' && ((b.d || 0) - (b.k || 0)) !== 0);
+  const hari = (a, b) => Math.round((Date.parse(b) - Date.parse(a)) / 864e5);
+  const urut = (a, b) => (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : 0);
+  const pilihTgl = (invs, tgl, batas) => {
+    const sesudah = invs.filter(i => i.tgl >= tgl && (!batas || hari(tgl, i.tgl) <= 120)).sort(urut)[0];
+    if (sesudah) return sesudah;
+    return invs.filter(i => i.tgl < tgl && (!batas || hari(i.tgl, tgl) <= 45)).sort((a, b) => urut(b, a))[0] || null;
+  };
+  const prof = (list || []).filter(i => i.jenis === 'jual').map(i => {
+    const jr = M.jrById[i.id] || {}, no = String(i.no || '').trim().toLowerCase();
+    const re = no.length >= 4 && /\d/.test(no)
+      ? new RegExp('(^|[^a-z0-9])' + no.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/(?:\\?[-\/_ .])+/g, '[-/_ .]*') + '($|[^a-z0-9])') : null;
+    return { i, re, prj: jr.prj || '' };
+  });
+  // pelanggan: dikelompokkan menurut nama (kata penting, singkatan dari huruf awal kata)
+  const plg = {};
+  prof.forEach(p => {
+    const kata = Array.from(new Set(hppKata(p.i.pihak))).slice(0, 4); if (!kata.length) return;
+    const k = kata.join(' '), g = (plg[k] = plg[k] || { kata, sing: kata.length >= 3 ? kata.map(w => w[0]).join('') : '', invs: [] });
+    g.invs.push(p.i);
+  });
+  const kand = [];
+  M.txAll.forEach(t => {
+    if (t.jenis === 'transfer' || t.ivk) return;
+    const b = txBaris(t), v = nilai(b); if (Math.abs(v) < 0.5) return;
+    kand.push({ kind: 'tx', id: t.id, tgl: t.tgl, ket: ketTx(t, am), ref: t.ref || '', prj: t.prj || '', jml: v, hpp: adaHpp(b) });
+  });
+  Object.keys(M.jrById).forEach(id => {
+    const j = M.jrById[id]; if (j.hs || j.ivk || (j.inv && j.inv.jenis === 'jual')) return;
+    const v = nilai(j.baris); if (Math.abs(v) < 0.5) return;
+    kand.push({ kind: 'jr', id, tgl: j.tgl, ket: j.ket || j.ref || '', ref: j.ref || '', prj: j.prj || '', jml: v, hpp: adaHpp(j.baris) });
+  });
+  const saran = [];
+  kand.forEach(c => {
+    const teks = (c.ket + ' ' + c.ref).toLowerCase();
+    let hit = null, alasan = '';
+    const byNo = prof.filter(p => p.re && p.re.test(teks));
+    if (byNo.length) {
+      byNo.sort((a, b) => b.i.no.length - a.i.no.length);
+      if (byNo.length > 1 && byNo[0].i.no.length === byNo[1].i.no.length) return;   // ambigu: lebih dari satu nomor
+      hit = byNo[0].i; alasan = 'nomor';
+    }
+    if (!hit && c.prj) {
+      const pj = prof.filter(p => p.prj === c.prj).map(p => p.i);
+      if (pj.length) { hit = pj.length === 1 ? pj[0] : pilihTgl(pj, c.tgl, false); if (hit) alasan = 'proyek'; }
+    }
+    if (!hit && c.hpp) {
+      const kata = new Set(hppKata(teks));
+      const cocok = Object.keys(plg).filter(k => { const g = plg[k]; return (g.sing && kata.has(g.sing)) || g.kata.filter(w => kata.has(w)).length >= Math.min(2, g.kata.length); });
+      if (cocok.length === 1) { const x = pilihTgl(plg[cocok[0]].invs, c.tgl, true); if (x) { hit = x; alasan = 'pelanggan'; } }
+    }
+    if (hit) saran.push({ kind: c.kind, id: c.id, tgl: c.tgl, ket: c.ket, jml: c.jml, iid: hit.id, alasan });
+  });
+  return { saran, kandidat: kand.length };
+}
+
 /* ----- catatan yang perlu dilengkapi dengan rincian barang ----- */
 function hppBelumRinci(M, cfg) {
   const H = cfg && cfg.hpp, out = { beli: [], jual: [], selisih: [] };
@@ -1899,6 +1967,7 @@ const Store = (() => {
     hapusTx(id) { if (!bolehTulis()) return false; hapusItem('tx', id); notify(); return true; },
     simpanTxBanyak(list) { if (!bolehTulis()) return false; list.forEach(t => simpanItem('tx', t)); notify(); return true; },
     simpanJr(j) { if (!bolehTulis()) return false; simpanItem('jr', j); notify(); return true; },
+    simpanJrBanyak(list) { if (!bolehTulis()) return false; list.forEach(j => simpanItem('jr', j)); notify(); return true; },
     hapusJr(id) { if (!bolehTulis()) return false; hapusItem('jr', id); notify(); return true; },
     ubahConfig(fn, diam) { if (!bolehTulis()) return false; fn(S.config); persist('config'); if (!diam) notify(); return true; },
     gantiSemua(cfg, months) {
@@ -2088,7 +2157,7 @@ const PAGES = [
   { sep: 1 },
   { id: 'pengaturan', t: 'Pengaturan', ic: 'setelan' },
 ];
-const APP_VERSI = 'b4fb1b15de';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
+const APP_VERSI = '62f8df7dfa';   // diisi saat build versi mandiri; kosong/garis bawah = tampilan di dalam Claude
 const versiNyata = () => APP_VERSI.charAt(0) !== '_';
 const sptDilihat = () => { try { return localStorage.getItem('pembukuan.spt.dilihat') === '1'; } catch (e) { return true; } };
 const sptTandaiDilihat = () => { try { localStorage.setItem('pembukuan.spt.dilihat', '1'); } catch (e) { /* abaikan */ } };
@@ -4931,6 +5000,49 @@ function hppIvkSelect(sel) {
   return '<div class="fld"><label class="lbl" for="f-ivk">Biaya untuk invoice <span class="muted">(opsional)</span></label><select class="in" id="f-ivk"><option value="">Tidak terkait invoice</option>' + tampil.map(i => opt(i.id, (i.no || '(tanpa nomor)') + ' · ' + (i.pihak || '') + ' · ' + tglFmt(i.tgl), sel || '')).join('') + '</select><div class="hint">Biaya langsung yang ditautkan ikut dihitung sebagai HPP invoice itu.</div></div>';
 }
 
+/* ----- cocokkan biaya ke invoice secara otomatis ----- */
+const SARAN_ALASAN = { nomor: 'Nomor invoice disebut', proyek: 'Proyek sama', pelanggan: 'Nama pelanggan' };
+const saranTampil = () => HF.saran.slice(0, HF.lim);
+const saranN = () => saranTampil().filter(s => HF.pilih.has(s.kind + ':' + s.id)).length;
+function hppSaran() {
+  if (!hppBolehTulis()) return;
+  const r = hppSaranTaut(M, invSemua(M, hariIni())), I = hppInvData();
+  const saran = r.saran.filter(s => I[s.iid]).sort((a, b) => { const x = I[a.iid], y = I[b.iid]; return (x.tgl < y.tgl ? 1 : x.tgl > y.tgl ? -1 : 0) || (x.id < y.id ? -1 : x.id > y.id ? 1 : 0) || (a.tgl < b.tgl ? -1 : a.tgl > b.tgl ? 1 : 0); });
+  HF = { f: 'saran', saran, kandidat: r.kandidat, lim: 300, pilih: new Set(saran.filter(s => s.alasan !== 'pelanggan').map(s => s.kind + ':' + s.id)) };
+  bukaModal({
+    judul: 'Cocokkan biaya ke invoice', lebar: true, tanpaFokus: true, isi: '<div id="sar-box">' + saranHtml() + '</div>',
+    tombol: saran.length ? '<button class="btn" data-act="tutupModal">Batal</button><button class="btn pri" data-act="hppSaranTerap"><span>Terapkan (<span id="sar-n">' + saranN() + '</span>)</span></button>' : '<button class="btn pri" data-act="tutupModal">Tutup</button>',
+  });
+}
+function saranHtml() {
+  const I = hppInvData(), S = HF.saran;
+  if (!S.length) return '<div class="empty"><b>Tidak ada biaya yang bisa dicocokkan otomatis.</b>' + (HF.kandidat ? HF.kandidat + ' biaya belum ditautkan, tetapi keterangannya tidak memuat nomor invoice atau nama pelanggan yang dikenal. ' : 'Semua biaya sudah tertaut, atau belum ada biaya. ') +
+    'Tulis nomor invoice atau nama pelanggan di keterangan biaya, atau tautkan manual lewat tombol Tautkan biaya pada tiap invoice.</div>';
+  const cnt = {}; S.forEach(s => { cnt[s.alasan] = (cnt[s.alasan] || 0) + 1; });
+  let h = '<div class="sum"><span><b>' + S.length + '</b> biaya cocok ke <b>' + new Set(S.map(s => s.iid)).size + '</b> invoice</span>' +
+    ['nomor', 'proyek', 'pelanggan'].filter(k => cnt[k]).map(k => '<span class="chip ' + (k === 'pelanggan' ? 'warn' : 'ok') + '">' + cnt[k] + ' · ' + SARAN_ALASAN[k] + '</span>').join('') + '</div>' +
+    '<p class="note" style="margin-bottom:8px">Yang cocok dari nomor invoice atau proyek sudah dicentang. Yang cocok dari nama pelanggan hanya perkiraan (nama dan tanggal invoice terdekat), jadi belum dicentang: periksa dulu. Centang yang benar, lalu Terapkan.</p>' +
+    '<div class="bar"><button class="btn sm" data-act="hppSaranSemua">Centang semua</button><button class="btn sm" data-act="hppSaranNol">Kosongkan</button></div>';
+  const tampil = saranTampil(); let cur = '';
+  h += '<div class="tw" style="max-height:52vh;overflow:auto"><table class="t rapat"><tbody>' + tampil.map(s => {
+    const o = I[s.iid]; let g = '';
+    if (s.iid !== cur) { cur = s.iid; g = '<tr><td colspan="3" style="background:var(--surface-2)"><div class="k1"><span class="mono" style="font-size:12px">' + esc(o.no || '(tanpa nomor)') + '</span> · ' + esc(o.pihak || '(tanpa nama)') + '</div><div class="k2">' + tglFmt(o.tgl) + ' · penjualan ' + rp(o.dpp) + '</div></td></tr>'; }
+    return g + '<tr><td style="width:34px"><input type="checkbox" data-tk="' + esc(s.kind + ':' + s.id) + '" data-act-change="hppSaranPilih"' + (HF.pilih.has(s.kind + ':' + s.id) ? ' checked' : '') + ' aria-label="Tautkan ' + esc(s.ket) + '"></td>' +
+      '<td><div class="k1">' + esc(s.ket || '(tanpa keterangan)') + '</div><div class="k2">' + tglFmt(s.tgl) + ' · <span class="chip ' + (s.alasan === 'pelanggan' ? 'warn' : 'ok') + '">' + SARAN_ALASAN[s.alasan] + '</span></div></td><td class="n">' + angka(s.jml) + '</td></tr>';
+  }).join('') + '</tbody></table></div>';
+  if (S.length > tampil.length) h += '<p class="note" style="margin-top:8px">Menampilkan ' + tampil.length + ' dari ' + S.length + ' biaya. Sisanya muncul setelah ini diterapkan: jalankan Cocokkan otomatis lagi.</p>';
+  return h;
+}
+function saranSegar() { const b = $('#sar-box'); if (b) b.innerHTML = saranHtml(); const n = $('#sar-n'); if (n) n.textContent = saranN(); }
+function hppSaranTerap() {
+  const dipilih = saranTampil().filter(s => HF.pilih.has(s.kind + ':' + s.id));
+  if (!dipilih.length) { toast('Belum ada biaya yang dicentang.', true); return; }
+  const txs = [], jrs = [];
+  dipilih.forEach(s => { const src = s.kind === 'tx' ? M.txById[s.id] : M.jrById[s.id]; if (src) (s.kind === 'tx' ? txs : jrs).push(Object.assign({}, src, { ivk: s.iid })); });
+  if ((txs.length && !Store.simpanTxBanyak(txs)) || (jrs.length && !Store.simpanJrBanyak(jrs))) return;
+  toast((txs.length + jrs.length) + ' biaya ditautkan ke ' + new Set(dipilih.map(s => s.iid)).size + ' invoice.'); tutupModal();
+}
+
 /* ----- kartu stok ----- */
 function bukaKartu(b) {
   const H = hppH(), br = H && H.barang[b]; if (!br) return;
@@ -4963,6 +5075,8 @@ const ACT_HPP = {
   hppProyekBaru() { bukaProyek(null); }, hppProyekUbah(el) { bukaProyek(el.dataset.id); }, hppProyekSimpan() { hppProyekSimpan(); }, hppProyekHapus(el) { hppProyekHapus(el); },
   hppTaut(el) { bukaTaut(el.dataset.id); }, hppTautSimpan() { hppTautSimpan(); },
   hppInv(el) { bukaInvHpp(el.dataset.id); }, hppInvRinci(el) { tutupModal(); bukaRincian('jr', el.dataset.id); }, hppInvTaut(el) { bukaTautInv(el.dataset.id); }, hppTautInvSimpan() { hppTautInvSimpan(); }, hppInvLepas(el) { hppInvLepas(el); },
+  hppSaran() { hppSaran(); }, hppSaranTerap() { hppSaranTerap(); },
+  hppSaranSemua() { saranTampil().forEach(s => HF.pilih.add(s.kind + ':' + s.id)); saranSegar(); }, hppSaranNol() { HF.pilih.clear(); saranSegar(); },
   hlTambah() { hlBaca(); HF.lines.push({ b: '', q: '', h: '' }); hlGambar(); },
   hlHapus(el) { hlBaca(); HF.lines.splice(+el.dataset.i, 1); if (!HF.lines.length) HF.lines.push({ b: '', q: '', h: '' }); hlGambar(); },
   tabHpp(el) { UI.hpp.tab = el.dataset.t; render(); },
@@ -4988,6 +5102,7 @@ const ACTC_HPP = {
   hppProdResep() { hppProdResep(); },
   hppTautGanti(el) { HF.pid = el.value; tautMuat(); const b = $('.md-b'); if (b) b.innerHTML = tautHtml(); },
   hppTautPilih(el) { if (el.checked) HF.pilih.add(el.dataset.tk); else HF.pilih.delete(el.dataset.tk); },
+  hppSaranPilih(el) { if (el.checked) HF.pilih.add(el.dataset.tk); else HF.pilih.delete(el.dataset.tk); const n = $('#sar-n'); if (n) n.textContent = saranN(); },
   hppTautCari() { const b = $('.md-b'); if (!b) return; const q = $('#tt-q').value; b.innerHTML = HF.f === 'tautinv' ? tautInvHtml() : tautHtml(); const e = $('#tt-q'); e.value = q; e.focus(); e.setSelectionRange(q.length, q.length); },
 };
 
@@ -5131,7 +5246,7 @@ function hppTabInvoice(H, R) {
   if (f.iq) { const q = f.iq.toLowerCase(); js = js.filter(o => (o.no + ' ' + o.pihak + ' ' + o.ket).toLowerCase().indexOf(q) >= 0); }
   if (!semua.length) return '<div class="panel"><div class="empty"><b>Belum ada invoice penjualan tahun ' + th + '.</b>Catat invoice penjualan di menu Invoice (atau lewat tombol Penjualan di menu ini). HPP dan laba kotor tiap nomor invoice muncul di sini.</div></div>';
   let h = '<div class="sum" style="margin-bottom:10px"><span>Penjualan <b>' + rp(dpp) + '</b></span><span>HPP <b>' + rp(hpp) + '</b></span><span>Laba kotor <b class="' + (laba < 0 ? 'neg' : 'pos') + '">' + rp(laba) + '</b></span><span>Margin <b>' + pct(dpp ? laba / dpp : NaN) + '</b></span>' + (tanpa ? '<span class="chip warn">' + tanpa + ' invoice belum ada HPP</span>' : '<span class="chip ok">Semua invoice punya HPP</span>') + '</div>';
-  h += '<div class="bar"><select class="in" data-ui="hpp.inv" aria-label="Filter invoice" style="width:auto">' + opt('', 'Semua invoice', f.inv) + opt('tanpa', 'Belum ada HPP', f.inv) + opt('ada', 'Sudah ada HPP', f.inv) + '</select>' +
+  h += '<div class="bar">' + (Store.canWrite && H && H.aktif ? '<button class="btn" data-act="hppSaran">Cocokkan otomatis</button>' : '') + '<select class="in" data-ui="hpp.inv" aria-label="Filter invoice" style="width:auto">' + opt('', 'Semua invoice', f.inv) + opt('tanpa', 'Belum ada HPP', f.inv) + opt('ada', 'Sudah ada HPP', f.inv) + '</select>' +
     '<input class="in" type="search" data-uiq="hpp.iq" value="' + esc(f.iq) + '" placeholder="Cari nomor atau pelanggan" aria-label="Cari invoice" style="flex:1 1 180px;min-width:0"></div>';
   if (!js.length) return h + '<div class="panel"><div class="empty"><b>Tidak ada invoice yang cocok.</b>Ubah filter atau pencarian.</div></div>';
   const tampil = js.slice(0, 200);
@@ -5139,7 +5254,7 @@ function hppTabInvoice(H, R) {
     '<tr class="klik" data-act="hppInv" data-id="' + esc(o.id) + '"><td><div class="k1">' + esc(o.pihak || '(tanpa nama)') + '</div><div class="k2"><span class="mono" style="font-size:12px">' + esc(o.no || '(tanpa nomor)') + '</span> · ' + tglFmt(o.tgl) + '</div></td>' +
     '<td class="n">' + angka(o.dpp) + '</td><td class="n">' + (o.ada ? angka(o.hpp) : '<span class="muted">–</span>') + '</td><td class="n">' + (o.ada ? angka(o.laba) + '<div class="k2">' + pct(o.margin) + '</div>' : '<span class="chip warn">Belum ada</span>') + '</td></tr>').join('') + '</tbody></table></div>';
   if (js.length > tampil.length) h += '<p class="note" style="margin-top:8px">Menampilkan ' + tampil.length + ' dari ' + js.length + ' invoice. Persempit dengan filter atau pencarian.</p>';
-  return h + '<p class="note" style="margin-top:10px">HPP invoice = barang keluar dari stok (rincian barang pada invoice) + biaya langsung yang ditautkan ke invoice itu. Ketuk baris untuk melihat rinciannya, mengisi rincian barang, atau menautkan biaya.</p>';
+  return h + '<p class="note" style="margin-top:10px">HPP invoice = barang keluar dari stok (rincian barang pada invoice) + biaya langsung yang ditautkan ke invoice itu. Ketuk baris untuk melihat rinciannya, mengisi rincian barang, atau menautkan biaya. Tombol Cocokkan otomatis menautkan banyak biaya sekaligus dari nomor invoice, proyek, atau nama pelanggan di keterangannya.</p>';
 }
 
 /* ----- Excel ----- */

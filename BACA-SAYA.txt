@@ -68,6 +68,14 @@ CATATAN
    Transaksi baru juga bisa ditautkan lewat isian "Biaya untuk invoice" di formulir transaksi. Hanya biaya
    (akun HPP/beban) yang dihitung; pembayaran utang tidak dihitung dua kali. Invoice yang belum punya HPP
    ditandai "Belum ada HPP". Menautkan tidak mengubah angka Laba Rugi, hanya menambah rincian per invoice.
+   Cocokkan otomatis: di tab "Per Invoice" ada tombol "Cocokkan otomatis" untuk menautkan banyak biaya sekaligus.
+   Aplikasi mencari biaya yang belum tertaut, lalu mencocokkannya ke invoice dari (1) nomor invoice yang disebut
+   di keterangan atau referensi biaya, (2) proyek yang sama, atau (3) nama pelanggan atau singkatannya di
+   keterangan (khusus akun HPP), memilih invoice pelanggan itu yang tanggalnya terdekat setelah biaya (maksimal
+   120 hari) atau sebelumnya (maksimal 45 hari). Hasil dari nomor dan proyek sudah dicentang, hasil dari nama
+   pelanggan hanya perkiraan dan belum dicentang. Centang yang benar lalu tekan Terapkan; yang ragu, biarkan.
+   Biaya yang menyebut dua pelanggan sekaligus atau tidak punya petunjuk tidak ditebak. Tulis nomor invoice di
+   keterangan biaya (misalnya "Subkon AC INV-2026-0101") supaya kecocokannya pasti.
  - Kode akun dari berkas Cash Flow 2025 (PT Radhika) bisa dimasukkan sekali tekan: Pengaturan > Bagan Akun,
    tekan "Tambahkan ... akun". Ada 40 kode (1251, 2107, 4201, 5301, 6101, 7203, dan seterusnya) dengan nama dan
    jenis akun yang dibuat dari keterangan barisnya. Akun lama tidak dihapus, nama bisa diubah lewat tombol Ubah.
